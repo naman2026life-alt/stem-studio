@@ -10,6 +10,7 @@ build/
 separated/
 mixes/
 models/
+.model-cache/
 *.mp3
 *.wav
 *.m4a

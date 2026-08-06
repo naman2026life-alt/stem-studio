@@ -42,7 +42,7 @@ Browser UI (Gradio)
     └── mixing → pydub + FFmpeg → preview / WAV / MP3
 ```
 
-Each launch uses an OS temporary session directory. Files are available while the app is running and are removed by the operating system later. Model weights live in PyTorch's normal local cache. No music or model weights are committed.
+Each launch uses an OS temporary session directory. Files are available while the app is running and are removed by the operating system later. Model weights are cached in the ignored local `.model-cache` directory so subsequent runs can reuse them. No music or model weights are committed.
 
 ## Test
 

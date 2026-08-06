@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+import os
 from pathlib import Path
 
 from pydub import AudioSegment
@@ -24,8 +25,11 @@ def run_demucs(source: str | Path, output_root: str | Path, model: str = "htdemu
     source = validate_audio(source)
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    model_cache = Path(__file__).resolve().parent.parent / ".model-cache"
+    model_cache.mkdir(parents=True, exist_ok=True)
+    demucs_env = {**os.environ, "TORCH_HOME": str(model_cache)}
     command = [sys.executable, "-m", "demucs", "--two-stems", "vocals", "-n", model, "-o", str(output_root), str(source)]
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, capture_output=True, text=True, env=demucs_env)
     if result.returncode:
         detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Unknown Demucs error"
         raise RuntimeError(f"Separation failed: {detail}")
@@ -38,7 +42,7 @@ def run_demucs(source: str | Path, output_root: str | Path, model: str = "htdemu
 
     # A second pass produces a genuine drums stem; Demucs reuses its downloaded model.
     command[3:5] = ["--two-stems", "drums"]
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, capture_output=True, text=True, env=demucs_env)
     if result.returncode:
         detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Unknown Demucs error"
         raise RuntimeError(f"Drums separation failed: {detail}")
