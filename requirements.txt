@@ -1,0 +1,4 @@
+demucs==4.0.1
+gradio>=5.0,<7
+pydub>=0.25,<1
+torchcodec>=0.8,<1
