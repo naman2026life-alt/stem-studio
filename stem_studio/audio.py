@@ -11,7 +11,7 @@ from pathlib import Path
 
 from pydub import AudioSegment
 
-SUPPORTED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg"}
+SUPPORTED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".webm"}
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
 SUPPORTED_MEDIA_EXTENSIONS = SUPPORTED_EXTENSIONS | SUPPORTED_VIDEO_EXTENSIONS
 
@@ -21,7 +21,7 @@ def validate_audio(path: str | Path) -> Path:
     if not audio_path.exists():
         raise ValueError("Audio file could not be found.")
     if audio_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-        raise ValueError(f"Unsupported format: {audio_path.suffix}. Use MP3, WAV, M4A, FLAC, AAC, or OGG.")
+        raise ValueError(f"Unsupported format: {audio_path.suffix}. Use MP3, WAV, M4A, FLAC, AAC, OGG, or WEBM audio.")
     return audio_path
 
 

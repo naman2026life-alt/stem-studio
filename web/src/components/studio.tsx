@@ -3,12 +3,16 @@
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
+  CircleStop,
   Download,
   FileAudio,
   Film,
   FolderOpen,
   LoaderCircle,
+  Mic,
   Music,
+  Pause,
+  Play,
   Plus,
   RotateCcw,
   Scissors,
@@ -20,7 +24,7 @@ import {
 
 import type { SeparationJob } from "@/lib/types";
 
-const AUDIO_EXTENSIONS = /\.(mp3|wav|m4a|flac|aac|ogg)$/i;
+const AUDIO_EXTENSIONS = /\.(mp3|wav|m4a|flac|aac|ogg|webm)$/i;
 const VIDEO_EXTENSIONS = /\.(mp4|mov|m4v|mkv|webm|avi)$/i;
 const FILE_PICKER_ACCEPT = [
   ".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg",
@@ -32,6 +36,7 @@ const SESSION_KEY = "stem-studio-job-ids";
 
 type MediaKind = "audio" | "video";
 type BusyAction = "convert" | "trim" | "separate" | null;
+type RecordingState = "idle" | "requesting" | "recording" | "paused" | "processing";
 type TrimPart = { id: number; start: string; end: string };
 type UploadToken = { timestamp?: string; signature?: string };
 
@@ -57,10 +62,30 @@ function formatDuration(value: number) {
     : `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
+function formatRecordingTime(value: number) {
+  const totalSeconds = Math.floor(value);
+  return `${String(Math.floor(totalSeconds / 60)).padStart(2, "0")}:${String(totalSeconds % 60).padStart(2, "0")}`;
+}
+
 function mediaKind(file: File): MediaKind | null {
-  if (file.type.startsWith("audio/") || AUDIO_EXTENSIONS.test(file.name)) return "audio";
-  if (file.type.startsWith("video/") || VIDEO_EXTENSIONS.test(file.name)) return "video";
+  if (file.type.startsWith("audio/")) return "audio";
+  if (file.type.startsWith("video/")) return "video";
+  if (VIDEO_EXTENSIONS.test(file.name)) return "video";
+  if (AUDIO_EXTENSIONS.test(file.name)) return "audio";
   return null;
+}
+
+function recordingMimeType() {
+  if (typeof MediaRecorder === "undefined") return "";
+  return ["audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"]
+    .find((type) => MediaRecorder.isTypeSupported(type)) ?? "";
+}
+
+function recordingExtension(mimeType: string) {
+  if (mimeType.includes("mp4")) return "m4a";
+  if (mimeType.includes("ogg")) return "ogg";
+  if (mimeType.includes("wav")) return "wav";
+  return "webm";
 }
 
 function parseTime(value: string, emptyValue: number | null) {
@@ -124,8 +149,13 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   const [parts, setParts] = useState<TrimPart[]>([{ id: 1, start: "00:00", end: "00:09" }]);
   const [accessPassword, setAccessPassword] = useState("");
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
+  const [recordingState, setRecordingState] = useState<RecordingState>("idle");
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [message, setMessage] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const microphoneStreamRef = useRef<MediaStream | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
   const sourceUrl = useObjectUrl(sourceFile);
   const audioUrl = useObjectUrl(workingAudio);
 
@@ -181,8 +211,137 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     return () => window.clearInterval(timer);
   }, [jobs, refreshJobs]);
 
+  useEffect(() => {
+    if (recordingState !== "recording") return;
+    const timer = window.setInterval(() => setRecordingSeconds((current) => current + 0.25), 250);
+    return () => window.clearInterval(timer);
+  }, [recordingState]);
+
+  useEffect(() => () => {
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.ondataavailable = null;
+      recorder.onstop = null;
+      recorder.stop();
+    }
+    microphoneStreamRef.current?.getTracks().forEach((track) => track.stop());
+  }, []);
+
   function resetParts() {
     setParts([{ id: nextPartId++, start: "00:00", end: "00:09" }]);
+  }
+
+  function stopMicrophoneTracks() {
+    microphoneStreamRef.current?.getTracks().forEach((track) => track.stop());
+    microphoneStreamRef.current = null;
+  }
+
+  function activateRecordedAudio(file: File) {
+    setSourceFile(file);
+    setSourceKind("audio");
+    setBaseAudio(file);
+    setWorkingAudio(file);
+    setWorkingState("original");
+    setAudioDuration(0);
+    resetParts();
+  }
+
+  async function startRecording() {
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setMessage("This browser cannot record audio here. Update iOS or use the file picker instead.");
+      return;
+    }
+    setRecordingState("requesting");
+    setRecordingSeconds(0);
+    setMessage("Waiting for microphone permission…");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          autoGainControl: false,
+          echoCancellation: false,
+          noiseSuppression: false,
+        },
+      });
+      microphoneStreamRef.current = stream;
+      recordedChunksRef.current = [];
+      const preferredType = recordingMimeType();
+      let recorder: MediaRecorder;
+      try {
+        recorder = new MediaRecorder(stream, {
+          ...(preferredType ? { mimeType: preferredType } : {}),
+          audioBitsPerSecond: 192000,
+        });
+      } catch {
+        recorder = new MediaRecorder(stream);
+      }
+      mediaRecorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) recordedChunksRef.current.push(event.data);
+      };
+      recorder.onerror = () => {
+        stopMicrophoneTracks();
+        setRecordingState("idle");
+        setMessage("The recording stopped unexpectedly. Please try again.");
+      };
+      recorder.onstop = () => {
+        const chunks = recordedChunksRef.current;
+        const finalType = recorder.mimeType || preferredType || chunks[0]?.type || "audio/webm";
+        stopMicrophoneTracks();
+        mediaRecorderRef.current = null;
+        setRecordingState("idle");
+        if (!chunks.length) {
+          setMessage("No audio was captured. Please check microphone permission and retry.");
+          return;
+        }
+        const blob = new Blob(chunks, { type: finalType });
+        const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const file = new File(
+          [blob],
+          `stem-studio-recording-${timestamp}.${recordingExtension(finalType)}`,
+          { type: finalType },
+        );
+        activateRecordedAudio(file);
+        setMessage("Recording ready. Preview it below, then trim, download, or isolate it.");
+      };
+      recorder.start(1000);
+      setRecordingState("recording");
+      setMessage("Recording from this device. Tap Stop when you are finished.");
+    } catch (error) {
+      stopMicrophoneTracks();
+      setRecordingState("idle");
+      const name = error instanceof DOMException ? error.name : "";
+      if (name === "NotAllowedError") {
+        setMessage("Microphone access was blocked. Allow microphone access for this site in Safari or Chrome settings, then retry.");
+      } else if (name === "NotFoundError") {
+        setMessage("No microphone was found on this device.");
+      } else {
+        setMessage("Could not start the microphone. Please retry or choose an existing audio file.");
+      }
+    }
+  }
+
+  function pauseRecording() {
+    const recorder = mediaRecorderRef.current;
+    if (recorder?.state !== "recording") return;
+    recorder.pause();
+    setRecordingState("paused");
+    setMessage("Recording paused.");
+  }
+
+  function resumeRecording() {
+    const recorder = mediaRecorderRef.current;
+    if (recorder?.state !== "paused") return;
+    recorder.resume();
+    setRecordingState("recording");
+    setMessage("Recording resumed.");
+  }
+
+  function stopRecording() {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    setRecordingState("processing");
+    setMessage("Finishing your recording…");
+    recorder.stop();
   }
 
   function chooseFile(event: ChangeEvent<HTMLInputElement>) {
@@ -362,7 +521,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   }
 
   const configured = Boolean(processorUrl);
-  const busy = busyAction !== null;
+  const busy = busyAction !== null || recordingState !== "idle";
 
   return (
     <section className="studio-grid mt-10 grid gap-5 xl:grid-cols-[1.08fr_.92fr]">
@@ -370,23 +529,53 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <p className="eyebrow">Media workspace</p>
-            <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">Upload, edit, then isolate</h2>
+            <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">Record or upload, edit, then isolate</h2>
           </div>
           <span className="limit-pill">150 MB max</span>
         </div>
 
-        <button
-          aria-label="Add audio or video from this device"
-          className="upload-zone mt-7"
-          disabled={!configured || busy}
-          onClick={() => inputRef.current?.click()}
-          type="button"
-        >
-          <span className="upload-plus"><Plus size={25} strokeWidth={2.2} /></span>
-          <span className="max-w-full truncate font-medium text-white">{sourceFile ? sourceFile.name : "Add audio or video"}</span>
-          <span className="text-xs text-slate-400">Tap to browse Files, iCloud Drive, Downloads, or On My iPhone</span>
-          <span className="file-types">MP3, M4A, WAV, FLAC, AAC, OGG · MP4, MOV, M4V, MKV, WEBM, AVI</span>
-        </button>
+        <div className="source-choice-grid mt-7">
+          <button
+            aria-label="Add audio or video from this device"
+            className="upload-zone"
+            disabled={!configured || busy}
+            onClick={() => inputRef.current?.click()}
+            type="button"
+          >
+            <span className="upload-plus"><Plus size={25} strokeWidth={2.2} /></span>
+            <span className="max-w-full truncate font-medium text-white">{sourceFile ? sourceFile.name : "Add an existing file"}</span>
+            <span className="text-xs text-slate-400">Browse Files, iCloud Drive, Downloads, or On My iPhone</span>
+            <span className="file-types">MP3, M4A, WAV, FLAC, AAC, OGG · MP4, MOV, M4V, MKV, WEBM, AVI</span>
+          </button>
+
+          <section className={`recorder-zone recorder-${recordingState}`} aria-label="Record audio in Stem Studio">
+            <span className="recorder-mark"><Mic size={25} /></span>
+            <span className="font-medium text-white">
+              {recordingState === "recording" ? "Recording now" : recordingState === "paused" ? "Recording paused" : "Record in Stem Studio"}
+            </span>
+            {recordingState === "idle" && (
+              <>
+                <span className="text-xs leading-5 text-slate-400">Use this iPhone’s microphone—no Voice Recorder export required</span>
+                <button className="record-button" disabled={busyAction !== null} onClick={() => void startRecording()} type="button"><Mic size={16} />Start recording</button>
+              </>
+            )}
+            {(recordingState === "requesting" || recordingState === "processing") && (
+              <span className="recorder-working"><LoaderCircle className="animate-spin" size={17} />{recordingState === "requesting" ? "Requesting microphone…" : "Finishing recording…"}</span>
+            )}
+            {(recordingState === "recording" || recordingState === "paused") && (
+              <>
+                <span className="recording-timer" aria-live="polite"><span />{formatRecordingTime(recordingSeconds)}</span>
+                <div className="recorder-controls">
+                  {recordingState === "recording"
+                    ? <button className="recorder-control" onClick={pauseRecording} type="button"><Pause size={16} />Pause</button>
+                    : <button className="recorder-control" onClick={resumeRecording} type="button"><Play size={16} />Resume</button>}
+                  <button className="recorder-stop" onClick={stopRecording} type="button"><CircleStop size={16} />Stop & use</button>
+                </div>
+              </>
+            )}
+            <span className="recorder-privacy">Stays in this browser until you process or download it</span>
+          </section>
+        </div>
         <input
           ref={inputRef}
           aria-label="Audio or video file"
@@ -398,11 +587,19 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
         />
 
         <details className="phone-help mt-4">
-          <summary><Smartphone size={17} />Using Voice Memos on iPhone?</summary>
+          <summary><FolderOpen size={17} />Already recorded in another app?</summary>
           <div className="phone-help-body">
-            <p><span className="help-number">1</span><span className="help-copy">In Voice Memos, tap the recording, then <strong>••• → Share → Save to Files</strong>.</span></p>
-            <p><span className="help-number">2</span><span className="help-copy">Back here, tap the <strong>+ button</strong>, choose <strong>Choose File/Browse</strong>, and select it.</span></p>
-            <p><FolderOpen className="help-icon" size={16} /><span className="help-copy"><strong>M4A works directly.</strong> You do not need to convert a Voice Memo to MP3 first.</span></p>
+            <p><span className="help-number">1</span><span className="help-copy">In Apple Voice Memos, tap <strong>Share</strong>, then choose <strong>Save to Files</strong> in the iOS Share sheet.</span></p>
+            <p><span className="help-number">2</span><span className="help-copy">For third-party Recorder apps, use their own <strong>Share or Export</strong> action if they provide one. iOS does not let this website read another app’s private recordings.</span></p>
+            <p><FolderOpen className="help-icon" size={16} /><span className="help-copy">Then tap <strong>Add an existing file</strong> above. M4A and MP3 both work directly.</span></p>
+          </div>
+        </details>
+
+        <details className="phone-help mt-3">
+          <summary><Smartphone size={17} />Install Stem Studio like an app</summary>
+          <div className="phone-help-body">
+            <p><span className="help-number">1</span><span className="help-copy">Open this site in Safari, tap <strong>Share</strong>, then <strong>Add to Home Screen</strong>.</span></p>
+            <p><span className="help-number">2</span><span className="help-copy">Open Stem Studio from its new Home Screen icon and record directly here next time.</span></p>
           </div>
         </details>
 

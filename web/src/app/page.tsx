@@ -26,13 +26,13 @@ export default function Home() {
             Pull the song apart.<br /><span className="gradient-text">Keep what you need.</span>
           </h1>
           <p className="mt-7 max-w-2xl text-pretty text-lg leading-8 text-slate-300">
-            Turn a video into MP3, keep and join the exact song sections you want, then create no-vocals, drums-only, and vocals-only tracks.
+            Record a new take or bring your audio or video, keep the exact sections you want, then create no-vocals, drums-only, and vocals-only tracks.
           </p>
         </div>
 
         <div className="feature-grid mt-12 grid gap-4 sm:grid-cols-3">
           {[
-            [Film, "Audio or video", "Upload common audio formats or extract an MP3 from video."],
+            [Film, "Record or upload", "Use your microphone directly or choose existing audio or video."],
             [Scissors, "Trim and merge", "Keep multiple time ranges and join them in the order you choose."],
             [WandSparkles, "Three useful stems", "Instrumental, drums, and vocals from the full or edited audio."],
           ].map(([Icon, title, text]) => {

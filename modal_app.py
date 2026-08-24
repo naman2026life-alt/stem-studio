@@ -201,7 +201,7 @@ def web():
         _verify_upload_token(x_stem_timestamp, x_stem_signature)
         suffix = Path(file.filename or "").suffix.lower()
         if suffix not in SUPPORTED_EXTENSIONS:
-            raise HTTPException(status_code=415, detail="Use MP3, WAV, M4A, FLAC, AAC, or OGG.")
+            raise HTTPException(status_code=415, detail="Use MP3, WAV, M4A, FLAC, AAC, OGG, or WEBM audio.")
 
         source_name = Path(file.filename or "audio").name
         job_id = uuid.uuid4().hex

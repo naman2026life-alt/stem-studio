@@ -75,3 +75,19 @@ def test_extract_video_audio_to_mp3(tmp_path: Path):
 
     assert output.exists()
     assert 0.9 <= probe_duration_seconds(output) <= 1.1
+
+
+def test_browser_recorded_webm_can_be_trimmed(tmp_path: Path):
+    source = tmp_path / "browser-recording.webm"
+    output = tmp_path / "browser-recording-trimmed.mp3"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+            "sine=frequency=440:duration=1", "-c:a", "libopus", str(source),
+        ],
+        check=True,
+    )
+
+    trim_and_merge_audio(source, [(0.2, 0.8)], output)
+
+    assert 580 <= len(AudioSegment.from_file(output)) <= 620

@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -15,6 +15,21 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Stem Studio — Separate vocals, drums, and instrumentals",
   description: "Create vocals, drums, and instrumental stems in a temporary audio workspace.",
+  applicationName: "Stem Studio",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "Stem Studio",
+  },
+  formatDetection: {
+    telephone: false,
+  },
+};
+
+export const viewport: Viewport = {
+  colorScheme: "dark",
+  themeColor: "#070913",
+  viewportFit: "cover",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

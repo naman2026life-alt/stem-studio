@@ -24,10 +24,24 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .button-primary:hover:not(:disabled) { transform:translateY(-1px); filter:brightness(1.08); }
 .button-ghost { border:1px solid rgba(255,255,255,.12); color:#e2e8f0; background:rgba(255,255,255,.045); }
 .button-ghost:hover:not(:disabled) { background:rgba(255,255,255,.08); }
-.upload-zone { display:flex; min-height:11rem; width:100%; flex-direction:column; align-items:center; justify-content:center; gap:.7rem; border:1px dashed rgba(167,139,250,.38); border-radius:1.25rem; color:#a78bfa; background:rgba(124,58,237,.055); padding:1.25rem; text-align:center; transition:.2s ease; }
+.source-choice-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.75rem; }
+.upload-zone { display:flex; min-height:12.5rem; width:100%; flex-direction:column; align-items:center; justify-content:center; gap:.7rem; border:1px dashed rgba(167,139,250,.38); border-radius:1.25rem; color:#a78bfa; background:rgba(124,58,237,.055); padding:1.25rem; text-align:center; transition:.2s ease; }
 .upload-zone:hover { border-color:rgba(167,139,250,.7); background:rgba(124,58,237,.09); }
 .upload-plus { display:grid; height:3.1rem; width:3.1rem; place-items:center; border:1px solid rgba(196,181,253,.22); border-radius:1rem; color:white; background:linear-gradient(145deg,#7c3aed,#4f46e5); box-shadow:0 12px 32px rgba(79,70,229,.27); }
 .file-types { max-width:32rem; font-size:.66rem; line-height:1rem; color:#64748b; }
+.recorder-zone { display:flex; min-height:12.5rem; flex-direction:column; align-items:center; justify-content:center; gap:.65rem; border:1px solid rgba(56,189,248,.18); border-radius:1.25rem; background:linear-gradient(145deg,rgba(14,165,233,.075),rgba(124,58,237,.045)); padding:1.15rem; text-align:center; }
+.recorder-mark { display:grid; height:3.1rem; width:3.1rem; place-items:center; border:1px solid rgba(125,211,252,.2); border-radius:1rem; color:#bae6fd; background:rgba(14,165,233,.1); box-shadow:0 12px 32px rgba(14,165,233,.1); }
+.recorder-recording .recorder-mark { border-color:rgba(251,113,133,.35); color:#fecdd3; background:rgba(244,63,94,.14); animation:recording-pulse 1.8s ease-in-out infinite; }
+.record-button,.recorder-control,.recorder-stop { display:inline-flex; min-height:2.55rem; align-items:center; justify-content:center; gap:.45rem; border-radius:.75rem; padding:.62rem .8rem; font-size:.76rem; font-weight:700; }
+.record-button { border:1px solid rgba(125,211,252,.2); color:white; background:linear-gradient(135deg,#0284c7,#4f46e5); }
+.recorder-controls { display:grid; width:100%; grid-template-columns:1fr 1.25fr; gap:.5rem; }
+.recorder-control { border:1px solid rgba(255,255,255,.1); color:#e2e8f0; background:rgba(255,255,255,.045); }
+.recorder-stop { border:1px solid rgba(251,113,133,.22); color:#ffe4e6; background:rgba(225,29,72,.15); }
+.recording-timer { display:inline-flex; align-items:center; gap:.45rem; font-family:var(--font-geist-mono),monospace; font-size:1.05rem; font-weight:700; color:#f8fafc; }
+.recording-timer span { height:.55rem; width:.55rem; border-radius:999px; background:#fb7185; box-shadow:0 0 0 5px rgba(251,113,133,.1); }
+.recorder-working { display:inline-flex; align-items:center; gap:.45rem; font-size:.75rem; color:#bae6fd; }
+.recorder-privacy { max-width:15rem; font-size:.62rem; line-height:1rem; color:#64748b; }
+@keyframes recording-pulse { 50% { transform:scale(1.04); box-shadow:0 0 0 8px rgba(244,63,94,.08); } }
 .phone-help { border:1px solid rgba(125,211,252,.12); border-radius:1rem; background:rgba(14,165,233,.045); color:#cbd5e1; }
 .phone-help summary { display:flex; min-height:2.9rem; align-items:center; gap:.55rem; padding:.75rem .9rem; font-size:.78rem; font-weight:650; color:#bae6fd; cursor:pointer; list-style:none; }
 .phone-help summary::-webkit-details-marker { display:none; }
@@ -75,7 +89,8 @@ button:disabled { cursor: not-allowed; opacity: .52; }
   .shell { padding-left:max(1.25rem,env(safe-area-inset-left)); padding-right:max(1.25rem,env(safe-area-inset-right)); }
   .status-pill { display:none; }
   .feature-card { min-height:0; padding:1.05rem; }
-  .upload-zone { min-height:10rem; border-radius:1rem; padding:1rem; }
+  .source-choice-grid { grid-template-columns:1fr; }
+  .upload-zone,.recorder-zone { min-height:10.5rem; border-radius:1rem; padding:1rem; }
   .button-primary,.button-ghost,.stem-button { min-height:2.75rem; }
   .password-input,.part-row input { font-size:1rem; }
   .output-row audio { width:100%; flex-basis:100%; }

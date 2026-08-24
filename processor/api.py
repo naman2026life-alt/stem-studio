@@ -208,7 +208,7 @@ async def create_job(
     source_name = Path(file.filename or "audio").name
     suffix = Path(source_name).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
-        raise HTTPException(status_code=415, detail="Use MP3, WAV, M4A, FLAC, AAC, or OGG.")
+        raise HTTPException(status_code=415, detail="Use MP3, WAV, M4A, FLAC, AAC, OGG, or WEBM audio.")
     with jobs_lock:
         pending = sum(job.status in {"queued", "processing"} for job in jobs.values())
     if pending >= MAX_PENDING_JOBS:

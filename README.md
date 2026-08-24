@@ -117,9 +117,11 @@ Use one container worker. The portable API keeps temporary job state in its loca
 
 ## Hosted workflow and supported media
 
-- Audio inputs: MP3, WAV, M4A, FLAC, AAC, and OGG.
+- Audio inputs: MP3, WAV, M4A, FLAC, AAC, OGG, and browser-recorded WEBM.
 - Video inputs: MP4, MOV, M4V, MKV, WEBM, and AVI. Extracting the first audio track to a 320 kbps MP3 is optional.
-- iPhone: Safari and Chrome use the native Files picker. Voice Memos normally shares recordings as M4A, which is accepted directly; save the memo to Files, then choose it from iCloud Drive, Downloads, or On My iPhone.
+- Built-in recorder: capture a new take from the device microphone, pause/resume, stop, preview, download, trim, or isolate it without first exporting from another app. iPhone recordings use Safari's AAC/MP4 support; other browsers can use WEBM/Opus.
+- Existing iPhone recordings: Safari and Chrome use the native Files picker. Voice Memos normally shares recordings as M4A, which is accepted directly after the user exports it through the iOS Share sheet.
+- Home Screen app: in iPhone Safari, use **Share → Add to Home Screen**. The web-app manifest, standalone display mode, theme, and Apple touch icon are included.
 - Upload limit: 150 MB per operation.
 - Trim and merge: add up to 50 ordered parts using raw seconds, `MM:SS`, or `HH:MM:SS`. An empty end uses the rest of the file; values beyond the duration are capped at the end.
 - The converted or trimmed MP3 becomes the active audio and can be previewed, downloaded, edited again, or isolated.
@@ -149,6 +151,7 @@ Tests use generated tones; no copyrighted music or model weights are committed.
 - Demucs can leave vocal bleed or musical artifacts, especially on dense mixes.
 - Video conversion uses the first audio track. Videos without audio cannot be converted.
 - Trim/merge is lossily exported as a 320 kbps MP3; repeated edits re-encode the active audio, so it is better to describe all desired parts in one merge when possible.
+- iOS does not let a website read another app's private recordings, and WebKit does not currently support receiving shared files through the Web Share Target API. Use the built-in recorder for a no-export workflow, or the source app's Share/Export action for an existing recording.
 - Hosted jobs are intentionally temporary. Refresh recovery works within the same browser session, but there is no long-term history.
 - Vocal recording/mixing is currently in the local Gradio app; the first hosted release focuses on the two highest-priority outputs: no-vocals and drums-only.
 
