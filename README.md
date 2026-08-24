@@ -1,19 +1,34 @@
 # Stem Studio
 
-A private, local-first Mac app for turning songs into useful practice tracks and mixing your own vocals back in. Nothing is uploaded to a cloud service.
+Stem Studio turns a song into **instrumental/no-vocals**, **drums-only**, and **vocals-only** tracks, then lets you mix a separate vocal recording over the instrumental. The repository contains both the original local app and a cloud-ready web stack.
 
-## What it does
+## Where it lives
 
-- Accepts MP3, WAV, M4A, FLAC, AAC, and OGG audio.
-- Creates **instrumental/no-vocals**, **drums-only**, and **vocals-only** tracks with Demucs.
-- Previews and downloads each stem in the browser.
-- Mixes a recorded/uploaded vocal with the instrumental.
-- Adjusts vocal timing (including negative offsets), trims the vocal, and controls both track levels.
-- Previews the result and exports lossless WAV plus 320 kbps MP3.
+- Source: `https://github.com/naman2026life-alt/stem-studio`
+- Local app: Gradio on your Mac; it exists only while `python app.py` is running.
+- Cloud web app: Next.js in `web/`, designed for Vercel.
+- Cloud data: Supabase Auth, Postgres job records, and a private Storage bucket.
+- Separation compute: `worker.py`, initially run on a Mac or a dedicated worker host. Demucs is intentionally not placed in a Vercel or Supabase function.
 
-## macOS setup (Apple Silicon)
+## Architecture
 
-Open Terminal and run:
+```text
+Vercel (Next.js UI)
+  ├── Google login via Supabase Auth
+  ├── resumable private uploads to Supabase Storage
+  └── job status + signed downloads through Supabase RLS
+                     │
+                     ▼
+Supabase (Postgres + private Storage)
+                     │ queued jobs
+                     ▼
+Python worker (Demucs + FFmpeg)
+  └── one four-stem pass → vocals / drums / recombined no-vocals
+```
+
+Supabase is useful in the hosted version because it owns identity, private files, and durable job state. It is not needed for the original single-user local app. Demucs is too CPU-, memory-, and duration-heavy for ordinary serverless functions, so the worker remains a separate process.
+
+## Local Gradio app (Apple Silicon)
 
 ```bash
 brew install ffmpeg python@3.11
@@ -26,32 +41,92 @@ pip install -r requirements.txt
 python app.py
 ```
 
-The app opens at `http://127.0.0.1:7860`. Stop it with Control-C. Intel Macs can replace `/opt/homebrew/bin/python3.11` with `python3.11`.
+Open `http://127.0.0.1:7860`. The first separation downloads the Demucs model into the ignored `.model-cache` directory. A full four-stem pass is used once, then bass, drums, and other are recombined to create the instrumental.
 
-## First run and performance
+## Cloud setup
 
-Demucs downloads its model on the first separation (roughly a few hundred MB) and caches it locally. Separation is compute-heavy. PyTorch support and song length determine speed; Apple Silicon works locally, but a several-minute song can take several minutes. Stem separation is excellent for an open-source model but is not artifact-free.
+### 1. Create and migrate Supabase
 
-Timing is deliberately manual in this MVP. Use the offset in 10 ms increments, trim any count-in/silence, and adjust gains while previewing. Automatic alignment is not included because a solo vocal and an instrumental often lack enough shared signal for cross-correlation to be dependable.
-
-## Architecture
-
-```text
-Browser UI (Gradio)
-    ├── separation → Demucs CLI → vocals / drums / no_vocals WAV
-    └── mixing → pydub + FFmpeg → preview / WAV / MP3
-```
-
-Each launch uses an OS temporary session directory. Files are available while the app is running and are removed by the operating system later. Model weights are cached in the ignored local `.model-cache` directory so subsequent runs can reuse them. No music or model weights are committed.
-
-## Test
+Create a Supabase project, then link and apply the committed migration:
 
 ```bash
-pip install -r requirements-dev.txt
-pytest
+npx supabase login
+npx supabase link --project-ref YOUR_PROJECT_REF
+npx supabase db push
 ```
 
-Tests synthesize tones locally; no copyrighted audio is included.
+The migration creates `separation_jobs`, enables RLS, grants least-privilege client access, and creates a private `audio` bucket with per-user storage policies.
+
+In Supabase Auth, enable Google and add these redirect URLs:
+
+```text
+http://localhost:3000/auth/callback
+https://YOUR_VERCEL_DOMAIN/auth/callback
+```
+
+### 2. Run the Vercel web app locally
+
+```bash
+cd web
+cp .env.example .env.local
+# Fill in NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000`. Only the publishable key belongs in the web app; never add a Supabase secret key to a `NEXT_PUBLIC_` variable.
+
+### 3. Run the separation worker
+
+```bash
+cd ..
+source .venv/bin/activate
+pip install -r requirements-worker.txt
+cp .env.worker.example .env.worker
+# Fill in SUPABASE_URL and the server-only SUPABASE_SECRET_KEY
+set -a; source .env.worker; set +a
+python worker.py
+```
+
+Keep the secret key only on the worker host. The worker polls queued jobs, downloads the private source, runs Demucs, uploads WAV stems, and records completion or failure.
+
+### 4. Deploy `web/` to Vercel
+
+Import this GitHub repository, set the project root directory to `web`, and add:
+
+```text
+NEXT_PUBLIC_SUPABASE_URL
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+```
+
+Deploy, then add the final Vercel callback URL in Supabase Auth.
+
+## Supported audio and controls
+
+- Inputs: MP3, WAV, M4A, FLAC, AAC, and OGG.
+- Outputs: instrumental/no-vocals, drums, and vocals as WAV.
+- Local mixing: manual vocal offset, trim start/end, vocal gain, instrumental gain, WAV preview, and WAV/320 kbps MP3 export.
+- Cloud uploads: resumable 6 MB chunks, private bucket, 150 MB per-file limit.
+
+## Validation
+
+```bash
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest
+cd web
+npm run lint
+npm run build
+```
+
+Tests use synthetic tones; no copyrighted music or model weights are committed.
+
+## Current limitations
+
+- The web app needs a running worker. For always-on public use, deploy `worker.py` to a dedicated CPU/GPU service.
+- Supabase Free includes 1 GB of file storage, so delete old audio or add retention cleanup before inviting many users.
+- Separation can produce audible artifacts and speed depends on the worker hardware.
+- The local app contains vocal mixing controls; the first hosted interface focuses on secure separation jobs and downloads.
 
 ## License
 

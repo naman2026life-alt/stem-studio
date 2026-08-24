@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
 import uuid
-import os
 from pathlib import Path
 
 from pydub import AudioSegment
@@ -28,7 +28,7 @@ def run_demucs(source: str | Path, output_root: str | Path, model: str = "htdemu
     model_cache = Path(__file__).resolve().parent.parent / ".model-cache"
     model_cache.mkdir(parents=True, exist_ok=True)
     demucs_env = {**os.environ, "TORCH_HOME": str(model_cache)}
-    command = [sys.executable, "-m", "demucs", "--two-stems", "vocals", "-n", model, "-o", str(output_root), str(source)]
+    command = [sys.executable, "-m", "demucs", "-n", model, "-o", str(output_root), str(source)]
     result = subprocess.run(command, capture_output=True, text=True, env=demucs_env)
     if result.returncode:
         detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Unknown Demucs error"
@@ -36,19 +36,18 @@ def run_demucs(source: str | Path, output_root: str | Path, model: str = "htdemu
 
     stem_dir = output_root / model / source.stem
     vocals = stem_dir / "vocals.wav"
-    no_vocals = stem_dir / "no_vocals.wav"
-    if not vocals.exists() or not no_vocals.exists():
+    drums = stem_dir / "drums.wav"
+    bass = stem_dir / "bass.wav"
+    other = stem_dir / "other.wav"
+    if not all(path.exists() for path in (vocals, drums, bass, other)):
         raise RuntimeError("Demucs finished, but expected output files were not created.")
 
-    # A second pass produces a genuine drums stem; Demucs reuses its downloaded model.
-    command[3:5] = ["--two-stems", "drums"]
-    result = subprocess.run(command, capture_output=True, text=True, env=demucs_env)
-    if result.returncode:
-        detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Unknown Demucs error"
-        raise RuntimeError(f"Drums separation failed: {detail}")
-    drums = stem_dir / "drums.wav"
-    if not drums.exists():
-        raise RuntimeError("Demucs finished, but the drums output was not created.")
+    # A single four-stem pass is considerably faster than running two separate models.
+    no_vocals = stem_dir / "no_vocals.wav"
+    instrumental = AudioSegment.from_file(drums)
+    instrumental = instrumental.overlay(AudioSegment.from_file(bass))
+    instrumental = instrumental.overlay(AudioSegment.from_file(other))
+    instrumental.export(no_vocals, format="wav")
     return {"vocals": vocals, "drums": drums, "instrumental": no_vocals}
 
 
