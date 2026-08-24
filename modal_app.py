@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import hashlib
 import hmac
 import json
@@ -190,15 +188,15 @@ def web():
             drums_url=None,
             instrumental_url=None,
         )
-        data_volume.commit()
-        call = separate.spawn(job_id)
+        await data_volume.commit.aio()
+        call = await separate.spawn.aio(job_id)
         _write_status(job_id, call_id=call.object_id)
-        data_volume.commit()
+        await data_volume.commit.aio()
         return _public_status(status)
 
     @web_app.get("/jobs/{job_id}")
     async def get_job(job_id: str):
-        data_volume.reload()
+        await data_volume.reload.aio()
         path = _status_path(job_id)
         if not path.exists():
             raise HTTPException(status_code=404, detail="This job expired or could not be found.")
@@ -213,7 +211,7 @@ def web():
             raise HTTPException(status_code=404, detail="Unknown stem.")
         path = _job_dir(job_id) / "outputs" / f"{stem}.wav"
         if not path.exists():
-            data_volume.reload()
+            await data_volume.reload.aio()
         if not path.exists():
             raise HTTPException(status_code=404, detail="This output expired or could not be found.")
         status = json.loads(_status_path(job_id).read_text())
