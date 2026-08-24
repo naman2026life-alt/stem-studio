@@ -91,9 +91,12 @@ Import this GitHub repository with the project root set to `web`, then add:
 ```text
 NEXT_PUBLIC_PROCESSOR_URL=https://YOUR-MODAL-WEB-URL
 PROCESSOR_SHARED_SECRET=THE-SAME-GENERATED-VALUE
+STEM_STUDIO_PASSWORD=A-SEPARATE-STRONG-PERSONAL-PASSWORD
 ```
 
 Redeploy after adding or changing `NEXT_PUBLIC_PROCESSOR_URL`, because public Next.js variables are embedded at build time.
+
+`STEM_STUDIO_PASSWORD` keeps the upload-token endpoint private so an unknown visitor cannot spend your compute credit. The GPU worker is also capped at one container and shuts down after 15 idle seconds.
 
 ## Portable Docker processor
 

@@ -83,7 +83,8 @@ def _verify_upload_token(timestamp: str | None, signature: str | None) -> None:
     image=image,
     gpu="T4",
     timeout=1800,
-    scaledown_window=300,
+    max_containers=1,
+    scaledown_window=15,
     volumes={str(DATA_ROOT): data_volume, str(MODEL_ROOT): model_volume},
 )
 def separate(job_id: str) -> None:

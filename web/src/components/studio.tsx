@@ -32,9 +32,10 @@ function parseError(xhr: XMLHttpRequest) {
   }
 }
 
-export function Studio({ processorUrl }: { processorUrl: string }) {
+export function Studio({ accessProtected, processorUrl }: { accessProtected: boolean; processorUrl: string }) {
   const [jobs, setJobs] = useState<SeparationJob[]>([]);
   const [file, setFile] = useState<File | null>(null);
+  const [accessPassword, setAccessPassword] = useState("");
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -107,7 +108,12 @@ export function Studio({ processorUrl }: { processorUrl: string }) {
     setUploading(true);
     setMessage("Preparing secure upload…");
     try {
-      const tokenResponse = await fetch("/api/upload-token", { method: "POST" });
+      const tokenResponse = await fetch("/api/upload-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: accessPassword }),
+      });
+      if (tokenResponse.status === 401) throw new Error("The studio password is incorrect.");
       if (!tokenResponse.ok) throw new Error("Could not authorize the upload. Please retry.");
       const token = await tokenResponse.json() as { timestamp?: string; signature?: string };
       const form = new FormData();
@@ -154,7 +160,20 @@ export function Studio({ processorUrl }: { processorUrl: string }) {
           <span className="text-xs text-slate-400">The source and results expire automatically</span>
         </button>
         <input ref={inputRef} className="hidden" type="file" accept=".mp3,.wav,.m4a,.flac,.aac,.ogg,audio/*" onChange={chooseFile} />
-        <button className="button-primary mt-4 w-full justify-center" disabled={!file || uploading || !configured} onClick={queueSeparation} type="button">
+        {accessProtected && (
+          <label className="mt-4 block text-xs font-medium uppercase tracking-[.12em] text-slate-400">
+            Studio password
+            <input
+              autoComplete="current-password"
+              className="password-input mt-2"
+              onChange={(event) => setAccessPassword(event.target.value)}
+              placeholder="Enter the private studio password"
+              type="password"
+              value={accessPassword}
+            />
+          </label>
+        )}
+        <button className="button-primary mt-4 w-full justify-center" disabled={!file || uploading || !configured || (accessProtected && !accessPassword)} onClick={queueSeparation} type="button">
           {uploading ? <LoaderCircle className="animate-spin" size={18} /> : <Music size={18} />}
           {uploading ? "Uploading…" : "Separate this song"}
         </button>

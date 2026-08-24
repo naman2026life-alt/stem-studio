@@ -4,6 +4,7 @@ import { Studio } from "@/components/studio";
 
 export default function Home() {
   const processorUrl = process.env.NEXT_PUBLIC_PROCESSOR_URL?.replace(/\/$/, "") ?? "";
+  const accessProtected = Boolean(process.env.STEM_STUDIO_PASSWORD);
 
   return (
     <main className="shell min-h-screen px-5 py-6 sm:px-8 lg:px-12">
@@ -46,7 +47,7 @@ export default function Home() {
           })}
         </div>
 
-        <Studio processorUrl={processorUrl} />
+        <Studio accessProtected={accessProtected} processorUrl={processorUrl} />
       </section>
     </main>
   );
