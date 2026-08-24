@@ -27,9 +27,10 @@ Modal (temporary FFmpeg tools + Demucs on a T4 GPU)
   ├── one four-stem pass (GPU)
   ├── vocals.wav
   ├── drums.wav
-  └── instrumental.wav (drums + bass + other)
+  ├── instrumental.wav (drums + bass + other)
+  └── compact 192 kbps MP3 copies prepared for mobile sharing
                     │
-                    └── preview/download; temporary tool files are deleted
+                    └── preview/save/share; temporary tool files are deleted
                         immediately and stem jobs after one hour
 ```
 
@@ -119,14 +120,14 @@ Use one container worker. The portable API keeps temporary job state in its loca
 
 - Audio inputs: MP3, WAV, M4A, FLAC, AAC, OGG, and browser-recorded WEBM.
 - Video inputs: MP4, MOV, M4V, MKV, WEBM, and AVI. Extracting the first audio track to a 320 kbps MP3 is optional.
-- Built-in recorder: capture a new take from the device microphone, pause/resume, stop, preview, download, trim, or isolate it without first exporting from another app. iPhone recordings use Safari's AAC/MP4 support; other browsers can use WEBM/Opus.
+- Built-in recorder: capture a new take from the device microphone, pause/resume, stop, preview, save, share, trim, or isolate it without first exporting from another app. iPhone recordings use Safari's AAC/MP4 support; other browsers can use WEBM/Opus.
 - Existing iPhone recordings: Safari and Chrome use the native Files picker. Voice Memos normally shares recordings as M4A, which is accepted directly after the user exports it through the iOS Share sheet.
 - Home Screen app: in iPhone Safari, use **Share → Add to Home Screen**. The web-app manifest, standalone display mode, theme, and Apple touch icon are included.
 - Upload limit: 150 MB per operation.
 - Trim and merge: add up to 50 ordered parts using raw seconds, `MM:SS`, or `HH:MM:SS`. An empty end uses the rest of the file; values beyond the duration are capped at the end.
 - Mobile duration picker: tapping Start or End opens touch-scroll wheels for hours, minutes, and seconds, plus an exact **End of track** shortcut. Desktop typing remains available.
-- The converted or trimmed MP3 becomes the active audio and can be previewed, downloaded, edited again, or isolated.
-- Outputs: instrumental/no-vocals, drums, and vocals as WAV, with browser preview and download.
+- The uploaded, recorded, converted, or trimmed file becomes the active audio and can be previewed, saved to the device, shared through the native share sheet, edited again, or isolated.
+- Outputs: instrumental/no-vocals, drums, and vocals as WAV, with browser preview, **Save to device**, and **Share to WhatsApp** actions. Compact 192 kbps MP3 copies are prepared in the background so an iPhone can open its share sheet with one tap without first fetching a full WAV. The full-quality WAV remains the saved output.
 - Local mixing: manual vocal offset, trim start/end, vocal gain, instrumental gain, WAV preview, and WAV/320 kbps MP3 export.
 - Hosted retention: no account or permanent library; source and outputs expire after one hour.
 
@@ -153,6 +154,7 @@ Tests use generated tones; no copyrighted music or model weights are committed.
 - Video conversion uses the first audio track. Videos without audio cannot be converted.
 - Trim/merge is lossily exported as a 320 kbps MP3; repeated edits re-encode the active audio, so it is better to describe all desired parts in one merge when possible.
 - iOS does not let a website read another app's private recordings, and WebKit does not currently support receiving shared files through the Web Share Target API. Use the built-in recorder for a no-export workflow, or the source app's Share/Export action for an existing recording.
+- A website cannot silently choose a WhatsApp recipient. **Share to WhatsApp** opens the operating system share sheet with the file attached; the user must select WhatsApp and the destination chat. Browsers without file-sharing support save the file so it can be attached manually.
 - Hosted jobs are intentionally temporary. Refresh recovery works within the same browser session, but there is no long-term history.
 - Vocal recording/mixing is currently in the local Gradio app; the first hosted release focuses on the two highest-priority outputs: no-vocals and drums-only.
 

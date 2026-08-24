@@ -110,7 +110,7 @@ def _parse_segments(value: str) -> list[tuple[float, float | None]]:
     volumes={str(DATA_ROOT): data_volume, str(MODEL_ROOT): model_volume},
 )
 def separate(job_id: str) -> None:
-    from stem_studio.audio import run_demucs
+    from stem_studio.audio import run_demucs, transcode_audio_to_mp3
 
     job_dir = _job_dir(job_id)
     source = next(job_dir.glob("source.*"))
@@ -126,6 +126,12 @@ def separate(job_id: str) -> None:
             for stem, source_path in outputs.items():
                 destination = output_dir / f"{stem}.wav"
                 shutil.copy2(source_path, destination)
+                try:
+                    transcode_audio_to_mp3(destination, output_dir / f"{stem}.mp3")
+                except (OSError, RuntimeError, ValueError):
+                    # The WAV is the canonical result; the UI can fall back to it
+                    # if the smaller convenience copy cannot be encoded.
+                    pass
                 urls[f"{stem}_url"] = f"/jobs/{job_id}/files/{stem}"
         source.unlink(missing_ok=True)
         _write_status(job_id, status="completed", progress=100, **urls)
@@ -306,6 +312,19 @@ def web():
         status = json.loads(_status_path(job_id).read_text())
         safe_name = Path(str(status["source_name"])).stem or "song"
         return FileResponse(path, media_type="audio/wav", filename=f"{safe_name}-{stem}.wav")
+
+    @web_app.get("/jobs/{job_id}/share/{stem}")
+    async def share_stem(job_id: str, stem: str):
+        if stem not in {"vocals", "drums", "instrumental"}:
+            raise HTTPException(status_code=404, detail="Unknown stem.")
+        path = _job_dir(job_id) / "outputs" / f"{stem}.mp3"
+        if not path.exists():
+            await data_volume.reload.aio()
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="This share file expired or could not be found.")
+        status = json.loads(_status_path(job_id).read_text())
+        safe_name = Path(str(status["source_name"])).stem or "song"
+        return FileResponse(path, media_type="audio/mpeg", filename=f"{safe_name}-{stem}.mp3")
 
     return web_app
 

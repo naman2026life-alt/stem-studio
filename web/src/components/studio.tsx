@@ -5,7 +5,6 @@ import {
   CheckCircle2,
   CircleStop,
   Clock3,
-  Download,
   FileAudio,
   Film,
   FolderOpen,
@@ -26,6 +25,7 @@ import {
 } from "lucide-react";
 
 import { DurationPicker } from "@/components/duration-picker";
+import { ExportActions } from "@/components/export-actions";
 import type { SeparationJob } from "@/lib/types";
 
 const AUDIO_EXTENSIONS = /\.(mp3|wav|m4a|flac|aac|ogg|webm)$/i;
@@ -132,6 +132,12 @@ function StatusIcon({ status }: { status: SeparationJob["status"] }) {
 
 function outputUrl(processorUrl: string, path: string) {
   return new URL(path, `${processorUrl}/`).toString();
+}
+
+function stemFileName(sourceName: string, stem: "instrumental" | "drums" | "vocals") {
+  const leafName = sourceName.split(/[\\/]/).pop() || "track";
+  const baseName = leafName.replace(/\.[^.]+$/, "") || "track";
+  return `${baseName}-${stem}.wav`;
 }
 
 function parseUploadError(xhr: XMLHttpRequest) {
@@ -356,7 +362,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
           { type: finalType },
         );
         activateRecordedAudio(file);
-        setMessage("Recording ready. Preview it below, then trim, download, or isolate it.");
+        setMessage("Recording ready. Preview it below, then save, share, trim, or isolate it.");
       };
       recorder.start(1000);
       setRecordingState("recording");
@@ -481,7 +487,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       setWorkingState("converted");
       setAudioDuration(0);
       resetParts();
-      setMessage("Video converted. The MP3 is ready to edit, download, or isolate.");
+      setMessage("Video converted. The MP3 is ready to edit, save, share, or isolate.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Video conversion failed. Please retry.");
     } finally {
@@ -692,7 +698,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
                 </div>
               </>
             )}
-            <span className="recorder-privacy">Stays in this browser until you process or download it</span>
+            <span className="recorder-privacy">Stays in this browser until you process, save, or share it</span>
           </section>
         </div>
         <input
@@ -766,8 +772,8 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
               preload="metadata"
               src={audioUrl}
             />
-            <div className="mt-4 flex flex-wrap gap-2">
-              <a className="button-ghost" download={workingAudio.name} href={audioUrl}><Download size={16} />Download active audio</a>
+            <div className="active-audio-actions mt-4">
+              <ExportActions file={workingAudio} key={`${workingAudio.name}-${workingAudio.size}-${workingAudio.lastModified}`} showHint />
               {workingState === "edited" && <button className="button-ghost" disabled={busy} onClick={restoreBaseAudio} type="button"><RotateCcw size={16} />Restore full audio</button>}
             </div>
           </section>
@@ -886,11 +892,19 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
                       <div className="output-row" key={stem}>
                         <div className="flex items-center gap-2 text-sm font-medium text-slate-200"><Music size={14} />{label}</div>
                         <audio className="h-9 min-w-0 flex-1" controls preload="none" src={url} />
-                        <a className="stem-button" download href={url}><Download size={13} /><span className="hidden sm:inline">Download</span></a>
+                        <ExportActions
+                          compact
+                          fileName={stemFileName(job.source_name, stem)}
+                          mimeType="audio/wav"
+                          remoteUrl={url}
+                          shareFileName={stemFileName(job.source_name, stem).replace(/\.wav$/, ".mp3")}
+                          shareMimeType="audio/mpeg"
+                          shareRemoteUrl={outputUrl(processorUrl, `/jobs/${job.id}/share/${stem}`)}
+                        />
                       </div>
                     );
                   })}
-                  <p className="text-xs text-slate-500">Download these files before this temporary job expires.</p>
+                  <p className="text-xs leading-5 text-slate-500">Save these files before this temporary job expires. Share opens your device’s share sheet with the audio attached—choose WhatsApp and a chat.</p>
                 </div>
               )}
               {(job.status === "queued" || job.status === "processing") && <div className="progress-track mt-4"><span style={{ width: `${Math.max(job.progress, 4)}%` }} /></div>}

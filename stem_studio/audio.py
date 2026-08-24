@@ -89,6 +89,29 @@ def extract_audio_to_mp3(source: str | Path, output_path: str | Path) -> Path:
     return destination
 
 
+def transcode_audio_to_mp3(
+    source: str | Path,
+    output_path: str | Path,
+    bitrate: str = "192k",
+) -> Path:
+    """Create a compact, share-ready MP3 from an audio file."""
+    source_path = validate_audio(source)
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error", "-i", str(source_path),
+            "-map", "0:a:0", "-vn", "-c:a", "libmp3lame", "-b:a", bitrate, str(destination),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        destination.unlink(missing_ok=True)
+        raise _command_error(result, "Could not prepare this audio for sharing.")
+    return destination
+
+
 def trim_and_merge_audio(
     source: str | Path,
     segments: Sequence[tuple[float, float | None]],

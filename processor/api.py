@@ -24,6 +24,7 @@ from stem_studio.audio import (
     SUPPORTED_VIDEO_EXTENSIONS,
     extract_audio_to_mp3,
     run_demucs,
+    transcode_audio_to_mp3,
     trim_and_merge_audio,
 )
 
@@ -180,6 +181,12 @@ def _process_job(job_id: str, source: Path) -> None:
         for stem, source_path in outputs.items():
             destination = output_dir / f"{stem}.wav"
             shutil.move(str(source_path), destination)
+            try:
+                transcode_audio_to_mp3(destination, output_dir / f"{stem}.mp3")
+            except (OSError, RuntimeError, ValueError):
+                # The WAV is the canonical result; the UI can fall back to it if
+                # the smaller convenience copy cannot be encoded.
+                pass
             urls[f"{stem}_url"] = f"/jobs/{job_id}/files/{stem}"
         source.unlink(missing_ok=True)
         _set_job(job_id, status="completed", progress=100, **urls)
@@ -307,3 +314,19 @@ def download_stem(job_id: str, stem: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="This output expired or could not be found.")
     safe_name = Path(job.source_name).stem or "song"
     return FileResponse(path, media_type="audio/wav", filename=f"{safe_name}-{stem}.wav")
+
+
+@app.get("/jobs/{job_id}/share/{stem}")
+def share_stem(job_id: str, stem: str) -> FileResponse:
+    _cleanup_expired()
+    if stem not in {"vocals", "drums", "instrumental"}:
+        raise HTTPException(status_code=404, detail="Unknown stem.")
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job or job.status != "completed":
+            raise HTTPException(status_code=404, detail="This output is not available.")
+    path = _job_dir(job_id) / "outputs" / f"{stem}.mp3"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="This share file expired or could not be found.")
+    safe_name = Path(job.source_name).stem or "song"
+    return FileResponse(path, media_type="audio/mpeg", filename=f"{safe_name}-{stem}.mp3")

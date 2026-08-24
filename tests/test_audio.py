@@ -8,6 +8,7 @@ from stem_studio.audio import (
     extract_audio_to_mp3,
     mix_tracks,
     probe_duration_seconds,
+    transcode_audio_to_mp3,
     trim_and_merge_audio,
 )
 
@@ -42,6 +43,17 @@ def test_trim_merge_preserves_order_and_clamps_to_duration(tmp_path: Path):
 
     assert output.exists()
     assert 1180 <= len(AudioSegment.from_file(output)) <= 1220
+
+
+def test_transcode_audio_to_share_mp3(tmp_path: Path):
+    source = tmp_path / "stem.wav"
+    output = tmp_path / "stem.mp3"
+    Sine(330).to_audio_segment(duration=1000).export(source, format="wav")
+
+    transcode_audio_to_mp3(source, output)
+
+    assert output.exists()
+    assert 0.9 <= probe_duration_seconds(output) <= 1.1
 
 
 def test_extract_video_audio_to_mp3(tmp_path: Path):
