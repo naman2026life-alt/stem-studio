@@ -124,6 +124,7 @@ Use one container worker. The portable API keeps temporary job state in its loca
 - Home Screen app: in iPhone Safari, use **Share → Add to Home Screen**. The web-app manifest, standalone display mode, theme, and Apple touch icon are included.
 - Upload limit: 150 MB per operation.
 - Trim and merge: add up to 50 ordered parts using raw seconds, `MM:SS`, or `HH:MM:SS`. An empty end uses the rest of the file; values beyond the duration are capped at the end.
+- Mobile duration picker: tapping Start or End opens touch-scroll wheels for hours, minutes, and seconds, plus an exact **End of track** shortcut. Desktop typing remains available.
 - The converted or trimmed MP3 becomes the active audio and can be previewed, downloaded, edited again, or isolated.
 - Outputs: instrumental/no-vocals, drums, and vocals as WAV, with browser preview and download.
 - Local mixing: manual vocal offset, trim start/end, vocal gain, instrumental gain, WAV preview, and WAV/320 kbps MP3 export.

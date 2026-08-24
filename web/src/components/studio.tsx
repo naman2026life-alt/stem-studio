@@ -4,6 +4,7 @@ import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useSta
 import {
   CheckCircle2,
   CircleStop,
+  Clock3,
   Download,
   FileAudio,
   Film,
@@ -24,6 +25,7 @@ import {
   XCircle,
 } from "lucide-react";
 
+import { DurationPicker } from "@/components/duration-picker";
 import type { SeparationJob } from "@/lib/types";
 
 const AUDIO_EXTENSIONS = /\.(mp3|wav|m4a|flac|aac|ogg|webm)$/i;
@@ -41,6 +43,7 @@ type BusyAction = "convert" | "trim" | "separate" | null;
 type ProtectedAction = Exclude<BusyAction, null>;
 type RecordingState = "idle" | "requesting" | "recording" | "paused" | "processing";
 type TrimPart = { id: number; start: string; end: string };
+type PickerTarget = { field: "start" | "end"; partId: number; partIndex: number };
 type UploadToken = { timestamp?: string; signature?: string };
 
 let nextPartId = 2;
@@ -68,6 +71,16 @@ function formatDuration(value: number) {
 function formatRecordingTime(value: number) {
   const totalSeconds = Math.floor(value);
   return `${String(Math.floor(totalSeconds / 60)).padStart(2, "0")}:${String(totalSeconds % 60).padStart(2, "0")}`;
+}
+
+function formatTimeValue(value: number) {
+  const totalSeconds = Math.max(0, Math.round(value));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours
+    ? `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+    : `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
 function mediaKind(file: File): MediaKind | null {
@@ -154,6 +167,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   const [passwordDraft, setPasswordDraft] = useState("");
   const [accessVerified, setAccessVerified] = useState(false);
   const [pendingAction, setPendingAction] = useState<ProtectedAction | null>(null);
+  const [pickerTarget, setPickerTarget] = useState<PickerTarget | null>(null);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [recordingState, setRecordingState] = useState<RecordingState>("idle");
   const [recordingSeconds, setRecordingSeconds] = useState(0);
@@ -162,6 +176,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   const unlockDialogRef = useRef<HTMLFormElement>(null);
   const unlockInputRef = useRef<HTMLInputElement>(null);
   const unlockTriggerRef = useRef<HTMLElement | null>(null);
+  const pickerTriggerRef = useRef<HTMLButtonElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const microphoneStreamRef = useRef<MediaStream | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
@@ -486,6 +501,28 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     setParts((current) => current.filter((part) => part.id !== id));
   }
 
+  function openDurationPicker(target: PickerTarget, trigger: HTMLButtonElement) {
+    pickerTriggerRef.current = trigger;
+    setPickerTarget(target);
+  }
+
+  const closeDurationPicker = useCallback(() => {
+    setPickerTarget(null);
+    window.setTimeout(() => pickerTriggerRef.current?.focus(), 0);
+  }, []);
+
+  function applyDurationPicker(seconds: number) {
+    if (!pickerTarget) return;
+    updatePart(pickerTarget.partId, pickerTarget.field, formatTimeValue(seconds));
+    closeDurationPicker();
+  }
+
+  function useTrackEnd() {
+    if (!pickerTarget || pickerTarget.field !== "end") return;
+    updatePart(pickerTarget.partId, "end", "");
+    closeDurationPicker();
+  }
+
   function parsedParts() {
     return parts.map((part, index) => {
       const rawStart = parseTime(part.start, 0);
@@ -594,6 +631,16 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
 
   const configured = Boolean(processorUrl);
   const busy = busyAction !== null || recordingState !== "idle";
+  const usableAudioDuration = Number.isFinite(audioDuration) && audioDuration > 0 ? audioDuration : 0;
+  const pickerPart = pickerTarget ? parts.find((part) => part.id === pickerTarget.partId) : null;
+  const pickerRawValue = pickerPart && pickerTarget ? pickerPart[pickerTarget.field] : "";
+  const pickerParsedValue = parseTime(
+    pickerRawValue,
+    pickerTarget?.field === "end" && usableAudioDuration > 0 ? usableAudioDuration : 0,
+  );
+  const pickerInitialSeconds = typeof pickerParsedValue === "number" && Number.isFinite(pickerParsedValue)
+    ? pickerParsedValue
+    : 0;
 
   return (
     <section className="studio-grid mt-10 grid gap-5 xl:grid-cols-[1.08fr_.92fr]">
@@ -714,6 +761,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
             <audio
               className="mt-4 w-full"
               controls
+              onDurationChange={(event) => setAudioDuration(event.currentTarget.duration)}
               onLoadedMetadata={(event) => setAudioDuration(event.currentTarget.duration)}
               preload="metadata"
               src={audioUrl}
@@ -729,15 +777,43 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
           <section className="workflow-card mt-5" aria-labelledby="trim-heading">
             <div className="step-heading">
               <span className="step-number">{sourceKind === "video" ? "3" : "2"}</span>
-              <div><h3 id="trim-heading">Choose parts to keep</h3><p>Parts are joined in this order. Use seconds, MM:SS, or HH:MM:SS.</p></div>
+              <div><h3 id="trim-heading">Choose parts to keep</h3><p>Tap a time to use the scroll wheels, or type seconds, MM:SS, or HH:MM:SS.</p></div>
             </div>
             <div className="mt-4 space-y-3">
               {parts.map((part, index) => (
                 <div className="part-row" key={part.id}>
                   <span className="part-label">Part {index + 1}</span>
-                  <label>Start<input aria-label={`Part ${index + 1} start`} inputMode="decimal" onChange={(event) => updatePart(part.id, "start", event.target.value)} placeholder="00:00" value={part.start} /></label>
+                  <div className="part-time-field">
+                    <span>Start</span>
+                    <div className="part-time-control">
+                      <input className="duration-manual-input" aria-label={`Part ${index + 1} start`} inputMode="decimal" onChange={(event) => updatePart(part.id, "start", event.target.value)} placeholder="00:00" value={part.start} />
+                      <button
+                        aria-label={`Set Part ${index + 1} start with scroll wheels`}
+                        className="duration-picker-trigger"
+                        disabled={busy}
+                        onClick={(event) => openDurationPicker({ field: "start", partId: part.id, partIndex: index }, event.currentTarget)}
+                        type="button"
+                      >
+                        <span className="duration-picker-value">{part.start || "00:00"}</span><Clock3 size={16} />
+                      </button>
+                    </div>
+                  </div>
                   <span className="part-arrow">→</span>
-                  <label>End<input aria-label={`Part ${index + 1} end`} inputMode="decimal" onChange={(event) => updatePart(part.id, "end", event.target.value)} placeholder={audioDuration ? formatDuration(audioDuration) : "End"} value={part.end} /></label>
+                  <div className="part-time-field">
+                    <span>End</span>
+                    <div className="part-time-control">
+                      <input className="duration-manual-input" aria-label={`Part ${index + 1} end`} inputMode="decimal" onChange={(event) => updatePart(part.id, "end", event.target.value)} placeholder={audioDuration ? formatDuration(audioDuration) : "End"} value={part.end} />
+                      <button
+                        aria-label={`Set Part ${index + 1} end with scroll wheels`}
+                        className="duration-picker-trigger"
+                        disabled={busy}
+                        onClick={(event) => openDurationPicker({ field: "end", partId: part.id, partIndex: index }, event.currentTarget)}
+                        type="button"
+                      >
+                        <span className="duration-picker-value">{part.end || "End of track"}</span><Clock3 size={16} />
+                      </button>
+                    </div>
+                  </div>
                   <button aria-label={`Remove part ${index + 1}`} className="icon-button" disabled={parts.length === 1 || busy} onClick={() => removePart(part.id)} type="button"><Trash2 size={16} /></button>
                 </div>
               ))}
@@ -859,6 +935,18 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
             <p className="unlock-note">Kept only in this browser tab—never stored in the audio file.</p>
           </form>
         </div>
+      )}
+
+      {pickerTarget && pickerPart && (
+        <DurationPicker
+          allowTrackEnd={pickerTarget.field === "end"}
+          initialSeconds={pickerInitialSeconds}
+          label={`Part ${pickerTarget.partIndex + 1} · ${pickerTarget.field === "start" ? "Start" : "End"}`}
+          maxSeconds={pickerTarget.field === "start" && usableAudioDuration > 1 ? usableAudioDuration - 1 : usableAudioDuration}
+          onCancel={closeDurationPicker}
+          onConfirm={applyDurationPicker}
+          onUseTrackEnd={useTrackEnd}
+        />
       )}
     </section>
   );
