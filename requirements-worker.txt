@@ -1,2 +1,0 @@
--r requirements.txt
-supabase==2.31.0

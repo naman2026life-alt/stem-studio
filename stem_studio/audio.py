@@ -25,7 +25,7 @@ def run_demucs(source: str | Path, output_root: str | Path, model: str = "htdemu
     source = validate_audio(source)
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
-    model_cache = Path(__file__).resolve().parent.parent / ".model-cache"
+    model_cache = Path(os.environ.get("TORCH_HOME", Path(__file__).resolve().parent.parent / ".model-cache"))
     model_cache.mkdir(parents=True, exist_ok=True)
     demucs_env = {**os.environ, "TORCH_HOME": str(model_cache)}
     command = [sys.executable, "-m", "demucs", "-n", model, "-o", str(output_root), str(source)]

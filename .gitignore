@@ -11,8 +11,7 @@ separated/
 mixes/
 models/
 .model-cache/
-.env.worker
-supabase/.temp/
+.env.processor
 *.mp3
 *.wav
 *.m4a

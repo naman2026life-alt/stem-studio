@@ -1,0 +1,19 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PORT=8000
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt requirements-processor.txt ./
+RUN pip install --no-cache-dir -r requirements-processor.txt
+
+COPY stem_studio ./stem_studio
+COPY processor ./processor
+
+EXPOSE 8000
+CMD ["sh", "-c", "uvicorn processor.api:app --host 0.0.0.0 --port ${PORT} --workers 1"]

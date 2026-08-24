@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Stem Studio — Private stem separation",
-  description: "Create vocals, drums, and instrumental stems in a private cloud workspace.",
+  title: "Stem Studio — Separate vocals, drums, and instrumentals",
+  description: "Create vocals, drums, and instrumental stems in a temporary audio workspace.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

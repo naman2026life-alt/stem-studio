@@ -1,32 +1,36 @@
 # Stem Studio
 
-Stem Studio turns a song into **instrumental/no-vocals**, **drums-only**, and **vocals-only** tracks, then lets you mix a separate vocal recording over the instrumental. The repository contains both the original local app and a cloud-ready web stack.
+Stem Studio turns a song into **instrumental/no-vocals**, **drums-only**, and **vocals-only** tracks. It also includes a local mixer for placing a separately recorded vocal over the instrumental with offset, trim, and gain controls.
 
 ## Where it lives
 
-- Source: `https://github.com/naman2026life-alt/stem-studio`
-- Local app: Gradio on your Mac; it exists only while `python app.py` is running.
-- Cloud web app: Next.js in `web/`, designed for Vercel.
-- Cloud data: Supabase Auth, Postgres job records, and a private Storage bucket.
-- Separation compute: `worker.py`, initially run on a Mac or a dedicated worker host. Demucs is intentionally not placed in a Vercel or Supabase function.
+- Source: <https://github.com/naman2026life-alt/stem-studio>
+- Local app: Gradio on your Mac at `http://127.0.0.1:7860` while `python app.py` is running.
+- Hosted interface: Next.js in `web/`, deployed to Vercel.
+- Hosted processing: `modal_app.py`, designed for temporary GPU jobs on Modal.
+- Portable processing API: `processor/api.py` and `Dockerfile.processor` for any suitable long-running container host.
 
-## Architecture
+## Why there is no Supabase
+
+The MVP is a simple upload → process → download flow. It does not need accounts, a database, or a permanent audio library, so Supabase would add setup and retention complexity without improving the core workflow.
+
+The hosted stack is intentionally lean:
 
 ```text
-Vercel (Next.js UI)
-  ├── Google login via Supabase Auth
-  ├── resumable private uploads to Supabase Storage
-  └── job status + signed downloads through Supabase RLS
-                     │
-                     ▼
-Supabase (Postgres + private Storage)
-                     │ queued jobs
-                     ▼
-Python worker (Demucs + FFmpeg)
-  └── one four-stem pass → vocals / drums / recombined no-vocals
+Vercel (Next.js interface)
+  └── short-lived signed upload request
+                    │ direct audio upload
+                    ▼
+Modal (temporary Demucs job on a T4 GPU)
+  ├── one four-stem pass
+  ├── vocals.wav
+  ├── drums.wav
+  └── instrumental.wav (drums + bass + other)
+                    │
+                    └── preview/download; automatic deletion after one hour
 ```
 
-Supabase is useful in the hosted version because it owns identity, private files, and durable job state. It is not needed for the original single-user local app. Demucs is too CPU-, memory-, and duration-heavy for ordinary serverless functions, so the worker remains a separate process.
+Vercel serves the interface but does not run Demucs. A full song can exceed the duration, memory, and package constraints of a free web function. Modal scales the processor to zero between jobs and provides $30/month of compute credit on its free Starter plan at the time this architecture was chosen.
 
 ## Local Gradio app (Apple Silicon)
 
@@ -41,92 +45,99 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Open `http://127.0.0.1:7860`. The first separation downloads the Demucs model into the ignored `.model-cache` directory. A full four-stem pass is used once, then bass, drums, and other are recombined to create the instrumental.
+Open <http://127.0.0.1:7860>. The first separation downloads the Demucs model into the ignored `.model-cache` directory. Stem Studio runs one four-stem pass, then recombines drums, bass, and other to create the instrumental.
 
-## Cloud setup
+## Run the Vercel interface and processor locally
 
-### 1. Create and migrate Supabase
-
-Create a Supabase project, then link and apply the committed migration:
+Terminal 1:
 
 ```bash
-npx supabase login
-npx supabase link --project-ref YOUR_PROJECT_REF
-npx supabase db push
+source .venv/bin/activate
+pip install -r requirements-processor.txt
+uvicorn processor.api:app --host 127.0.0.1 --port 8000
 ```
 
-The migration creates `separation_jobs`, enables RLS, grants least-privilege client access, and creates a private `audio` bucket with per-user storage policies.
-
-In Supabase Auth, enable Google and add these redirect URLs:
-
-```text
-http://localhost:3000/auth/callback
-https://YOUR_VERCEL_DOMAIN/auth/callback
-```
-
-### 2. Run the Vercel web app locally
+Terminal 2:
 
 ```bash
 cd web
 cp .env.example .env.local
-# Fill in NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
 npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`. Only the publishable key belongs in the web app; never add a Supabase secret key to a `NEXT_PUBLIC_` variable.
+Open <http://localhost:3000>. For a local-only run, the shared secret may be left blank. Set the same `PROCESSOR_SHARED_SECRET` on both services before exposing the processor publicly.
 
-### 3. Run the separation worker
+## Deploy the processor to Modal
 
 ```bash
-cd ..
 source .venv/bin/activate
-pip install -r requirements-worker.txt
-cp .env.worker.example .env.worker
-# Fill in SUPABASE_URL and the server-only SUPABASE_SECRET_KEY
-set -a; source .env.worker; set +a
-python worker.py
+pip install -r requirements-modal.txt
+modal setup
+
+# Generate a value once, then set the same value in Vercel.
+python -c 'import secrets; print(secrets.token_urlsafe(32))'
+modal secret create stem-studio-upload-secret PROCESSOR_SHARED_SECRET=PASTE_GENERATED_VALUE
+
+modal deploy modal_app.py
 ```
 
-Keep the secret key only on the worker host. The worker polls queued jobs, downloads the private source, runs Demucs, uploads WAV stems, and records completion or failure.
+The deploy command prints the public processor URL. The first real job downloads the `htdemucs` model into the persistent `stem-studio-models` volume. Audio jobs are stored in a separate temporary volume and cleaned up after one hour.
 
-### 4. Deploy `web/` to Vercel
+## Deploy the interface to Vercel
 
-Import this GitHub repository, set the project root directory to `web`, and add:
+Import this GitHub repository with the project root set to `web`, then add:
 
 ```text
-NEXT_PUBLIC_SUPABASE_URL
-NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+NEXT_PUBLIC_PROCESSOR_URL=https://YOUR-MODAL-WEB-URL
+PROCESSOR_SHARED_SECRET=THE-SAME-GENERATED-VALUE
 ```
 
-Deploy, then add the final Vercel callback URL in Supabase Auth.
+Redeploy after adding or changing `NEXT_PUBLIC_PROCESSOR_URL`, because public Next.js variables are embedded at build time.
+
+## Portable Docker processor
+
+If Modal is not desired, the same API can run on a container service with enough memory and a request/job lifetime of at least 30 minutes:
+
+```bash
+docker build -f Dockerfile.processor -t stem-studio-processor .
+docker run --rm -p 8000:8000 \
+  -e ALLOWED_ORIGINS=https://YOUR-VERCEL-DOMAIN \
+  -e PROCESSOR_SHARED_SECRET=YOUR_SHARED_SECRET \
+  stem-studio-processor
+```
+
+Use one container worker. The portable API keeps temporary job state in its local filesystem and is meant for a single-user MVP, not horizontal scaling.
 
 ## Supported audio and controls
 
-- Inputs: MP3, WAV, M4A, FLAC, AAC, and OGG.
-- Outputs: instrumental/no-vocals, drums, and vocals as WAV.
+- Inputs: MP3, WAV, M4A, FLAC, AAC, and OGG, up to 150 MB.
+- Outputs: instrumental/no-vocals, drums, and vocals as WAV, with browser preview and download.
 - Local mixing: manual vocal offset, trim start/end, vocal gain, instrumental gain, WAV preview, and WAV/320 kbps MP3 export.
-- Cloud uploads: resumable 6 MB chunks, private bucket, 150 MB per-file limit.
+- Hosted retention: no account or permanent library; source and outputs expire after one hour.
 
 ## Validation
 
 ```bash
 source .venv/bin/activate
 pip install -r requirements-dev.txt
-pytest
+pytest -q
+python -m py_compile modal_app.py processor/api.py
+
 cd web
 npm run lint
 npm run build
 ```
 
-Tests use synthetic tones; no copyrighted music or model weights are committed.
+Tests use generated tones; no copyrighted music or model weights are committed.
 
 ## Current limitations
 
-- The web app needs a running worker. For always-on public use, deploy `worker.py` to a dedicated CPU/GPU service.
-- Supabase Free includes 1 GB of file storage, so delete old audio or add retention cleanup before inviting many users.
-- Separation can produce audible artifacts and speed depends on the worker hardware.
-- The local app contains vocal mixing controls; the first hosted interface focuses on secure separation jobs and downloads.
+- The first hosted job is slower because it downloads and caches the Demucs model and starts a new compute container.
+- Separation speed varies with song length and available hardware; a five-minute song is typically several minutes on CPU and materially faster on a T4 GPU.
+- Demucs can leave vocal bleed or musical artifacts, especially on dense mixes.
+- Hosted jobs are intentionally temporary. Refresh recovery works within the same browser session, but there is no long-term history.
+- Vocal recording/mixing is currently in the local Gradio app; the first hosted release focuses on the two highest-priority outputs: no-vocals and drums-only.
 
 ## License
 

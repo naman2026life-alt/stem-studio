@@ -1,2 +1,4 @@
--r requirements.txt
+-r requirements-processor.txt
+gradio>=5.0,<7
+httpx>=0.28,<1
 pytest>=8,<9
