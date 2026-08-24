@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
   CircleStop,
@@ -9,6 +9,7 @@ import {
   Film,
   FolderOpen,
   LoaderCircle,
+  LockKeyhole,
   Mic,
   Music,
   Pause,
@@ -18,6 +19,7 @@ import {
   Scissors,
   Smartphone,
   Trash2,
+  UnlockKeyhole,
   WandSparkles,
   XCircle,
 } from "lucide-react";
@@ -36,6 +38,7 @@ const SESSION_KEY = "stem-studio-job-ids";
 
 type MediaKind = "audio" | "video";
 type BusyAction = "convert" | "trim" | "separate" | null;
+type ProtectedAction = Exclude<BusyAction, null>;
 type RecordingState = "idle" | "requesting" | "recording" | "paused" | "processing";
 type TrimPart = { id: number; start: string; end: string };
 type UploadToken = { timestamp?: string; signature?: string };
@@ -148,11 +151,17 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   const [audioDuration, setAudioDuration] = useState(0);
   const [parts, setParts] = useState<TrimPart[]>([{ id: 1, start: "00:00", end: "00:09" }]);
   const [accessPassword, setAccessPassword] = useState("");
+  const [passwordDraft, setPasswordDraft] = useState("");
+  const [accessVerified, setAccessVerified] = useState(false);
+  const [pendingAction, setPendingAction] = useState<ProtectedAction | null>(null);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [recordingState, setRecordingState] = useState<RecordingState>("idle");
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [message, setMessage] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const unlockDialogRef = useRef<HTMLFormElement>(null);
+  const unlockInputRef = useRef<HTMLInputElement>(null);
+  const unlockTriggerRef = useRef<HTMLElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const microphoneStreamRef = useRef<MediaStream | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
@@ -216,6 +225,37 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     const timer = window.setInterval(() => setRecordingSeconds((current) => current + 0.25), 250);
     return () => window.clearInterval(timer);
   }, [recordingState]);
+
+  useEffect(() => {
+    if (!pendingAction) return;
+    const focusTimer = window.setTimeout(() => unlockInputRef.current?.focus(), 0);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPasswordDraft("");
+        setPendingAction(null);
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(unlockDialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), input:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
+      ) ?? []);
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.clearTimeout(focusTimer);
+      window.removeEventListener("keydown", closeOnEscape);
+      unlockTriggerRef.current?.focus();
+    };
+  }, [pendingAction]);
 
   useEffect(() => () => {
     const recorder = mediaRecorderRef.current;
@@ -377,14 +417,19 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     }
   }
 
-  async function requestToken(): Promise<UploadToken> {
+  async function requestToken(password = accessPassword): Promise<UploadToken> {
     const tokenResponse = await fetch("/api/upload-token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: accessPassword }),
+      body: JSON.stringify({ password }),
     });
-    if (tokenResponse.status === 401) throw new Error("The studio password is incorrect.");
+    if (tokenResponse.status === 401) {
+      setAccessPassword("");
+      setAccessVerified(false);
+      throw new Error("The studio password is incorrect. Tap the action again to retry.");
+    }
     if (!tokenResponse.ok) throw new Error("Could not authorize processing. Please retry.");
+    if (accessProtected) setAccessVerified(true);
     return await tokenResponse.json() as UploadToken;
   }
 
@@ -395,8 +440,8 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     return headers;
   }
 
-  async function runMediaTool(path: string, form: FormData) {
-    const token = await requestToken();
+  async function runMediaTool(path: string, form: FormData, password?: string) {
+    const token = await requestToken(password);
     const response = await fetch(`${processorUrl}${path}`, {
       method: "POST",
       headers: tokenHeaders(token),
@@ -406,14 +451,14 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     return await response.blob();
   }
 
-  async function convertVideo() {
+  async function convertVideo(password?: string) {
     if (!sourceFile || sourceKind !== "video" || !processorUrl) return;
     setBusyAction("convert");
     setMessage("Uploading the video and extracting its audio…");
     try {
       const form = new FormData();
       form.append("file", sourceFile);
-      const blob = await runMediaTool("/tools/extract-mp3", form);
+      const blob = await runMediaTool("/tools/extract-mp3", form, password);
       const name = `${sourceFile.name.replace(VIDEO_EXTENSIONS, "") || "video"}.mp3`;
       const converted = new File([blob], name, { type: "audio/mpeg" });
       setBaseAudio(converted);
@@ -455,7 +500,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     });
   }
 
-  async function trimAndMerge() {
+  async function trimAndMerge(password?: string) {
     if (!workingAudio || !processorUrl) return;
     setBusyAction("trim");
     setMessage("Trimming the parts in order and joining them…");
@@ -464,7 +509,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       const form = new FormData();
       form.append("file", workingAudio);
       form.append("segments", JSON.stringify(normalized));
-      const blob = await runMediaTool("/tools/trim-merge", form);
+      const blob = await runMediaTool("/tools/trim-merge", form, password);
       const name = `${workingAudio.name.replace(AUDIO_EXTENSIONS, "") || "audio"}-trimmed.mp3`;
       setWorkingAudio(new File([blob], name, { type: "audio/mpeg" }));
       setWorkingState("edited");
@@ -487,12 +532,12 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     setMessage("Restored the full audio file.");
   }
 
-  async function queueSeparation() {
+  async function queueSeparation(password?: string) {
     if (!workingAudio || !processorUrl) return;
     setBusyAction("separate");
     setMessage("Preparing the secure audio upload…");
     try {
-      const token = await requestToken();
+      const token = await requestToken(password);
       const form = new FormData();
       form.append("file", workingAudio);
 
@@ -518,6 +563,33 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     } finally {
       setBusyAction(null);
     }
+  }
+
+  function executeAction(action: ProtectedAction, password?: string) {
+    if (action === "convert") void convertVideo(password);
+    if (action === "trim") void trimAndMerge(password);
+    if (action === "separate") void queueSeparation(password);
+  }
+
+  function runProtectedAction(action: ProtectedAction) {
+    if (accessProtected && !accessVerified) {
+      unlockTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      setPasswordDraft("");
+      setPendingAction(action);
+      return;
+    }
+    executeAction(action);
+  }
+
+  function submitUnlock(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const password = passwordDraft.trim();
+    if (!pendingAction || !password) return;
+    const action = pendingAction;
+    setAccessPassword(password);
+    setPasswordDraft("");
+    setPendingAction(null);
+    executeAction(action, password);
   }
 
   const configured = Boolean(processorUrl);
@@ -603,18 +675,11 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
           </div>
         </details>
 
-        {accessProtected && (
-          <label className="mt-4 block text-xs font-medium uppercase tracking-[.12em] text-slate-400">
-            Studio password
-            <input
-              autoComplete="current-password"
-              className="password-input mt-2"
-              onChange={(event) => setAccessPassword(event.target.value)}
-              placeholder="Enter the private studio password"
-              type="password"
-              value={accessPassword}
-            />
-          </label>
+        {accessProtected && accessVerified && (
+          <div className="unlock-status mt-4">
+            <span><UnlockKeyhole size={15} />Processing unlocked for this page</span>
+            <button onClick={() => { setAccessPassword(""); setAccessVerified(false); }} type="button">Change password</button>
+          </div>
         )}
 
         {sourceKind === "video" && sourceUrl && (
@@ -626,13 +691,14 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
             <video className="media-preview mt-4" controls preload="metadata" src={sourceUrl} />
             <button
               className="button-primary mt-4 w-full justify-center"
-              disabled={busy || (accessProtected && !accessPassword)}
-              onClick={convertVideo}
+              disabled={busy}
+              onClick={() => runProtectedAction("convert")}
               type="button"
             >
               {busyAction === "convert" ? <LoaderCircle className="animate-spin" size={18} /> : <Film size={18} />}
               {busyAction === "convert" ? "Converting…" : "Convert video to MP3"}
             </button>
+            {accessProtected && !accessVerified && <p className="processing-hint"><LockKeyhole size={13} />Private processing—password requested after you tap.</p>}
           </section>
         )}
 
@@ -679,11 +745,12 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
             <p className="mt-3 text-xs leading-5 text-slate-500">Times beyond {audioDuration ? formatDuration(audioDuration) : "the end"} are automatically capped at the end of the audio. Leave End blank to use the full remaining track.</p>
             <div className="mt-4 grid gap-2 sm:grid-cols-2">
               <button className="button-ghost justify-center" disabled={busy || parts.length >= 50} onClick={addPart} type="button"><Plus size={16} />Add another part</button>
-              <button className="button-primary justify-center" disabled={busy || (accessProtected && !accessPassword)} onClick={trimAndMerge} type="button">
+              <button className="button-primary justify-center" disabled={busy} onClick={() => runProtectedAction("trim")} type="button">
                 {busyAction === "trim" ? <LoaderCircle className="animate-spin" size={18} /> : <Scissors size={17} />}
                 {busyAction === "trim" ? "Trimming…" : "Trim & merge parts"}
               </button>
             </div>
+            {accessProtected && !accessVerified && <p className="processing-hint"><LockKeyhole size={13} />Private processing—password requested after you tap.</p>}
           </section>
         )}
 
@@ -695,13 +762,14 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
             </div>
             <button
               className="button-primary mt-4 w-full justify-center"
-              disabled={busy || !configured || (accessProtected && !accessPassword)}
-              onClick={queueSeparation}
+              disabled={busy || !configured}
+              onClick={() => runProtectedAction("separate")}
               type="button"
             >
               {busyAction === "separate" ? <LoaderCircle className="animate-spin" size={18} /> : <WandSparkles size={18} />}
               {busyAction === "separate" ? "Uploading…" : "Isolate instrumental, drums & vocals"}
             </button>
+            {accessProtected && !accessVerified && <p className="processing-hint"><LockKeyhole size={13} />Private processing—password requested after you tap.</p>}
           </section>
         )}
 
@@ -754,6 +822,44 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
           ))}
         </div>
       </article>
+
+      {pendingAction && (
+        <div className="unlock-backdrop">
+          <form
+            aria-describedby="unlock-description"
+            aria-labelledby="unlock-title"
+            aria-modal="true"
+            className="unlock-dialog"
+            onSubmit={submitUnlock}
+            ref={unlockDialogRef}
+            role="dialog"
+          >
+            <span className="unlock-icon"><LockKeyhole size={22} /></span>
+            <h2 id="unlock-title">Unlock private processing</h2>
+            <p id="unlock-description">
+              Enter the Stem Studio password to {pendingAction === "trim" ? "trim and merge these parts" : pendingAction === "convert" ? "convert this video" : "isolate this audio"}. It protects your Modal credits from public use.
+            </p>
+            <label>
+              Studio password
+              <input
+                autoComplete="current-password"
+                onChange={(event) => setPasswordDraft(event.target.value)}
+                placeholder="Enter the private studio password"
+                ref={unlockInputRef}
+                type="password"
+                value={passwordDraft}
+              />
+            </label>
+            <div className="unlock-actions">
+              <button className="button-ghost justify-center" onClick={() => { setPasswordDraft(""); setPendingAction(null); }} type="button">Cancel</button>
+              <button className="button-primary justify-center" disabled={!passwordDraft.trim()} type="submit">
+                <UnlockKeyhole size={17} />Unlock & continue
+              </button>
+            </div>
+            <p className="unlock-note">Kept only in this browser tab—never stored in the audio file.</p>
+          </form>
+        </div>
+      )}
     </section>
   );
 }

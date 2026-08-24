@@ -62,8 +62,22 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .notice-card { border:1px solid rgba(251,191,36,.16); border-radius:1rem; background:rgba(245,158,11,.07); padding:1rem; }
 .output-row { display:flex; flex-wrap:wrap; align-items:center; gap:.7rem; border:1px solid rgba(255,255,255,.06); border-radius:.85rem; background:rgba(255,255,255,.025); padding:.7rem; }
 .output-row audio { color-scheme:dark; }
-.password-input { width:100%; border:1px solid rgba(255,255,255,.1); border-radius:.85rem; outline:none; background:rgba(2,6,23,.45); padding:.75rem .9rem; font-size:.875rem; font-weight:400; letter-spacing:normal; color:white; }
-.password-input:focus { border-color:rgba(167,139,250,.65); box-shadow:0 0 0 3px rgba(124,58,237,.12); }
+.processing-hint { display:flex; align-items:center; justify-content:center; gap:.35rem; margin-top:.65rem; font-size:.68rem; line-height:1rem; color:#64748b; }
+.unlock-status { display:flex; min-height:2.7rem; align-items:center; justify-content:space-between; gap:.75rem; border:1px solid rgba(52,211,153,.15); border-radius:.85rem; background:rgba(16,185,129,.06); padding:.65rem .8rem; font-size:.72rem; color:#a7f3d0; }
+.unlock-status span { display:inline-flex; min-width:0; align-items:center; gap:.45rem; }
+.unlock-status button { min-height:2rem; border-radius:.55rem; padding:.35rem .5rem; font-size:.68rem; font-weight:700; color:#c4b5fd; }
+.unlock-status button:hover { background:rgba(124,58,237,.1); color:#ddd6fe; }
+.unlock-backdrop { position:fixed; inset:0; z-index:100; display:grid; place-items:center; overflow-y:auto; background:rgba(2,6,23,.78); padding:max(1rem,env(safe-area-inset-top)) max(1rem,env(safe-area-inset-right)) max(1rem,env(safe-area-inset-bottom)) max(1rem,env(safe-area-inset-left)); backdrop-filter:blur(9px); }
+.unlock-dialog { width:min(100%,27rem); border:1px solid rgba(196,181,253,.18); border-radius:1.35rem; background:linear-gradient(150deg,#111529,#090c19); box-shadow:0 32px 90px rgba(0,0,0,.58); padding:1.25rem; }
+.unlock-icon { display:grid; height:2.8rem; width:2.8rem; place-items:center; border:1px solid rgba(196,181,253,.2); border-radius:.9rem; color:#ddd6fe; background:rgba(124,58,237,.13); }
+.unlock-dialog h2 { margin-top:1rem; font-size:1.18rem; font-weight:700; color:#f8fafc; }
+.unlock-dialog > p { margin-top:.5rem; font-size:.78rem; line-height:1.3rem; color:#94a3b8; }
+.unlock-dialog label { display:grid; gap:.45rem; margin-top:1rem; font-size:.7rem; font-weight:700; letter-spacing:.09em; text-transform:uppercase; color:#94a3b8; }
+.unlock-dialog input { min-height:2.9rem; width:100%; border:1px solid rgba(255,255,255,.12); border-radius:.75rem; outline:none; background:rgba(2,6,23,.62); padding:.7rem .8rem; font-size:1rem; font-weight:400; letter-spacing:normal; color:white; }
+.unlock-dialog input:focus { border-color:rgba(167,139,250,.7); box-shadow:0 0 0 3px rgba(124,58,237,.14); }
+.unlock-actions { display:grid; grid-template-columns:1fr 1.3fr; gap:.55rem; margin-top:1rem; }
+.unlock-actions button { min-height:2.9rem; }
+.unlock-dialog .unlock-note { margin-top:.75rem; text-align:center; font-size:.65rem; line-height:1rem; color:#64748b; }
 .limit-pill { display:inline-flex; align-items:center; border:1px solid rgba(125,211,252,.15); border-radius:999px; background:rgba(14,165,233,.07); padding:.4rem .7rem; font-size:.7rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:#bae6fd; }
 .workflow-card { border:1px solid rgba(255,255,255,.075); border-radius:1.2rem; background:rgba(2,6,23,.33); padding:1rem; }
 .step-heading { display:flex; align-items:flex-start; gap:.8rem; }
@@ -92,7 +106,9 @@ button:disabled { cursor: not-allowed; opacity: .52; }
   .source-choice-grid { grid-template-columns:1fr; }
   .upload-zone,.recorder-zone { min-height:10.5rem; border-radius:1rem; padding:1rem; }
   .button-primary,.button-ghost,.stem-button { min-height:2.75rem; }
-  .password-input,.part-row input { font-size:1rem; }
+  .part-row input { font-size:1rem; }
+  .unlock-status { align-items:flex-start; flex-direction:column; }
+  .unlock-actions { grid-template-columns:1fr; }
   .output-row audio { width:100%; flex-basis:100%; }
   .part-row { grid-template-columns:auto 1fr auto; align-items:end; }
   .part-label { grid-column:1 / -1; }
