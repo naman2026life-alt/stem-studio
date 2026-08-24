@@ -125,7 +125,7 @@ def separate(job_id: str) -> None:
 @modal.concurrent(max_inputs=50)
 @modal.asgi_app()
 def web():
-    from fastapi import FastAPI, Header, HTTPException, UploadFile
+    from fastapi import FastAPI, File, Header, HTTPException, UploadFile
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse
 
@@ -144,7 +144,7 @@ def web():
 
     @web_app.post("/jobs", status_code=202)
     async def create_job(
-        file: UploadFile,
+        file: UploadFile = File(...),
         x_stem_timestamp: str | None = Header(default=None),
         x_stem_signature: str | None = Header(default=None),
     ):

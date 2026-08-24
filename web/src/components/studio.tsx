@@ -25,8 +25,16 @@ function outputUrl(processorUrl: string, path: string) {
 
 function parseError(xhr: XMLHttpRequest) {
   try {
-    const body = JSON.parse(xhr.responseText) as { detail?: string };
-    return body.detail || `Upload failed (${xhr.status}).`;
+    const body = JSON.parse(xhr.responseText) as { detail?: unknown };
+    if (typeof body.detail === "string") return body.detail;
+    if (Array.isArray(body.detail)) {
+      const details = body.detail
+        .map((item) => item && typeof item === "object" && "msg" in item ? String(item.msg) : "")
+        .filter(Boolean)
+        .join(" ");
+      if (details) return details;
+    }
+    return `Upload failed (${xhr.status}).`;
   } catch {
     return `Upload failed (${xhr.status || "network error"}).`;
   }
