@@ -6,13 +6,14 @@ import {
   Download,
   FileAudio,
   Film,
+  FolderOpen,
   LoaderCircle,
   Music,
   Plus,
   RotateCcw,
   Scissors,
+  Smartphone,
   Trash2,
-  UploadCloud,
   WandSparkles,
   XCircle,
 } from "lucide-react";
@@ -21,6 +22,11 @@ import type { SeparationJob } from "@/lib/types";
 
 const AUDIO_EXTENSIONS = /\.(mp3|wav|m4a|flac|aac|ogg)$/i;
 const VIDEO_EXTENSIONS = /\.(mp4|mov|m4v|mkv|webm|avi)$/i;
+const FILE_PICKER_ACCEPT = [
+  ".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg",
+  ".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi",
+  "audio/*", "video/*", "audio/x-m4a", "audio/mp4", "video/quicktime",
+].join(",");
 const MAX_BYTES = 150 * 1024 * 1024;
 const SESSION_KEY = "stem-studio-job-ids";
 
@@ -359,7 +365,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   const busy = busyAction !== null;
 
   return (
-    <section className="mt-10 grid gap-5 xl:grid-cols-[1.08fr_.92fr]">
+    <section className="studio-grid mt-10 grid gap-5 xl:grid-cols-[1.08fr_.92fr]">
       <article className="glass rounded-[2rem] p-6 sm:p-8">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
@@ -369,18 +375,36 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
           <span className="limit-pill">150 MB max</span>
         </div>
 
-        <button className="upload-zone mt-7" disabled={!configured || busy} onClick={() => inputRef.current?.click()} type="button">
-          <UploadCloud size={28} />
-          <span className="max-w-full truncate font-medium text-white">{sourceFile ? sourceFile.name : "Choose audio or video"}</span>
-          <span className="text-xs text-slate-400">Audio: MP3, WAV, M4A, FLAC, AAC, OGG · Video: MP4, MOV, M4V, MKV, WEBM, AVI</span>
+        <button
+          aria-label="Add audio or video from this device"
+          className="upload-zone mt-7"
+          disabled={!configured || busy}
+          onClick={() => inputRef.current?.click()}
+          type="button"
+        >
+          <span className="upload-plus"><Plus size={25} strokeWidth={2.2} /></span>
+          <span className="max-w-full truncate font-medium text-white">{sourceFile ? sourceFile.name : "Add audio or video"}</span>
+          <span className="text-xs text-slate-400">Tap to browse Files, iCloud Drive, Downloads, or On My iPhone</span>
+          <span className="file-types">MP3, M4A, WAV, FLAC, AAC, OGG · MP4, MOV, M4V, MKV, WEBM, AVI</span>
         </button>
         <input
           ref={inputRef}
+          aria-label="Audio or video file"
           className="hidden"
           type="file"
-          accept=".mp3,.wav,.m4a,.flac,.aac,.ogg,.mp4,.mov,.m4v,.mkv,.webm,.avi,audio/*,video/*"
+          accept={FILE_PICKER_ACCEPT}
           onChange={chooseFile}
+          onClick={(event) => { event.currentTarget.value = ""; }}
         />
+
+        <details className="phone-help mt-4">
+          <summary><Smartphone size={17} />Using Voice Memos on iPhone?</summary>
+          <div className="phone-help-body">
+            <p><span className="help-number">1</span><span className="help-copy">In Voice Memos, tap the recording, then <strong>••• → Share → Save to Files</strong>.</span></p>
+            <p><span className="help-number">2</span><span className="help-copy">Back here, tap the <strong>+ button</strong>, choose <strong>Choose File/Browse</strong>, and select it.</span></p>
+            <p><FolderOpen className="help-icon" size={16} /><span className="help-copy"><strong>M4A works directly.</strong> You do not need to convert a Voice Memo to MP3 first.</span></p>
+          </div>
+        </details>
 
         {accessProtected && (
           <label className="mt-4 block text-xs font-medium uppercase tracking-[.12em] text-slate-400">

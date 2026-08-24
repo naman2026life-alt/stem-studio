@@ -19,8 +19,8 @@ export default function Home() {
         <span className="status-pill"><span className="status-dot" /> No account needed</span>
       </header>
 
-      <section className="mx-auto max-w-6xl pb-20 pt-16 sm:pt-24">
-        <div className="max-w-3xl">
+      <section className="home-content mx-auto max-w-6xl pb-20 pt-16 sm:pt-24">
+        <div className="hero-copy max-w-3xl">
           <p className="eyebrow">Built for practice and performance</p>
           <h1 className="mt-7 text-balance text-5xl font-semibold tracking-[-0.055em] text-white sm:text-7xl">
             Pull the song apart.<br /><span className="gradient-text">Keep what you need.</span>
@@ -30,7 +30,7 @@ export default function Home() {
           </p>
         </div>
 
-        <div className="mt-12 grid gap-4 sm:grid-cols-3">
+        <div className="feature-grid mt-12 grid gap-4 sm:grid-cols-3">
           {[
             [Film, "Audio or video", "Upload common audio formats or extract an MP3 from video."],
             [Scissors, "Trim and merge", "Keep multiple time ranges and join them in the order you choose."],

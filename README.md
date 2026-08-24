@@ -119,6 +119,7 @@ Use one container worker. The portable API keeps temporary job state in its loca
 
 - Audio inputs: MP3, WAV, M4A, FLAC, AAC, and OGG.
 - Video inputs: MP4, MOV, M4V, MKV, WEBM, and AVI. Extracting the first audio track to a 320 kbps MP3 is optional.
+- iPhone: Safari and Chrome use the native Files picker. Voice Memos normally shares recordings as M4A, which is accepted directly; save the memo to Files, then choose it from iCloud Drive, Downloads, or On My iPhone.
 - Upload limit: 150 MB per operation.
 - Trim and merge: add up to 50 ordered parts using raw seconds, `MM:SS`, or `HH:MM:SS`. An empty end uses the rest of the file; values beyond the duration are capped at the end.
 - The converted or trimmed MP3 becomes the active audio and can be previewed, downloaded, edited again, or isolated.
