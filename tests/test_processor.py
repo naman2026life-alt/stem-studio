@@ -1,8 +1,10 @@
 import io
+import json
 import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from pydub import AudioSegment
 from pydub.generators import Sine
 
 from processor import api
@@ -50,3 +52,40 @@ def test_rejects_unsupported_file(monkeypatch, tmp_path: Path):
     client = TestClient(api.app)
     response = client.post("/jobs", files={"file": ("notes.txt", b"hello", "text/plain")})
     assert response.status_code == 415
+
+
+def test_trim_merge_tool_clamps_end_to_duration(tmp_path: Path):
+    client = TestClient(api.app)
+    wav = io.BytesIO()
+    Sine(330).to_audio_segment(duration=1000).export(wav, format="wav")
+
+    response = client.post(
+        "/tools/trim-merge",
+        files={"file": ("test.wav", wav.getvalue(), "audio/wav")},
+        data={
+            "segments": json.dumps(
+                [
+                    {"start_seconds": 0, "end_seconds": 0.2},
+                    {"start_seconds": 0.7, "end_seconds": 20},
+                ]
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/mpeg"
+    assert 480 <= len(AudioSegment.from_file(io.BytesIO(response.content))) <= 520
+
+
+def test_trim_merge_rejects_empty_parts():
+    client = TestClient(api.app)
+    wav = io.BytesIO()
+    Sine(330).to_audio_segment(duration=100).export(wav, format="wav")
+
+    response = client.post(
+        "/tools/trim-merge",
+        files={"file": ("test.wav", wav.getvalue(), "audio/wav")},
+        data={"segments": "[]"},
+    )
+
+    assert response.status_code == 422

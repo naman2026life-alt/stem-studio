@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import json
 import os
 import shutil
 import tempfile
@@ -12,11 +14,18 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
-from stem_studio.audio import SUPPORTED_EXTENSIONS, run_demucs
+from stem_studio.audio import (
+    SUPPORTED_EXTENSIONS,
+    SUPPORTED_VIDEO_EXTENSIONS,
+    extract_audio_to_mp3,
+    run_demucs,
+    trim_and_merge_audio,
+)
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "150")) * 1024 * 1024
 JOB_TTL_SECONDS = int(os.environ.get("JOB_TTL_SECONDS", "3600"))
@@ -101,6 +110,57 @@ def _verify_upload_token(timestamp: str | None, signature: str | None) -> None:
         raise HTTPException(status_code=401, detail="The upload token is invalid.")
 
 
+async def _save_upload(file: UploadFile, directory: Path, allowed_extensions: set[str]) -> Path:
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in allowed_extensions:
+        raise HTTPException(status_code=415, detail="This file format is not supported for that action.")
+    directory.mkdir(parents=True, exist_ok=True)
+    source = directory / f"source{suffix}"
+    size = 0
+    try:
+        with source.open("wb") as destination:
+            while chunk := await file.read(CHUNK_BYTES):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Choose a file smaller than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+                    )
+                destination.write(chunk)
+    except Exception:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+    finally:
+        await file.close()
+    if size == 0:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    return source
+
+
+def _parse_segments(value: str) -> list[tuple[float, float | None]]:
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail="The trim parts are invalid.") from exc
+    if not isinstance(payload, list) or not payload:
+        raise HTTPException(status_code=422, detail="Add at least one part to trim and merge.")
+    if len(payload) > 50:
+        raise HTTPException(status_code=422, detail="Use no more than 50 trim parts at a time.")
+    result: list[tuple[float, float | None]] = []
+    for index, part in enumerate(payload, start=1):
+        if not isinstance(part, dict):
+            raise HTTPException(status_code=422, detail=f"Part {index} is invalid.")
+        start = part.get("start_seconds")
+        end = part.get("end_seconds")
+        if isinstance(start, bool) or not isinstance(start, (int, float)):
+            raise HTTPException(status_code=422, detail=f"Part {index} has an invalid start time.")
+        if end is not None and (isinstance(end, bool) or not isinstance(end, (int, float))):
+            raise HTTPException(status_code=422, detail=f"Part {index} has an invalid end time.")
+        result.append((float(start), None if end is None else float(end)))
+    return result
+
+
 def _set_job(job_id: str, **values: object) -> None:
     with jobs_lock:
         job = jobs.get(job_id)
@@ -138,14 +198,15 @@ def health() -> dict[str, object]:
 
 @app.post("/jobs", status_code=202)
 async def create_job(
-    file: UploadFile,
+    file: UploadFile = File(...),
     x_stem_timestamp: str | None = Header(default=None),
     x_stem_signature: str | None = Header(default=None),
 ) -> dict[str, object]:
     _cleanup_expired()
     _verify_upload_token(x_stem_timestamp, x_stem_signature)
 
-    suffix = Path(file.filename or "").suffix.lower()
+    source_name = Path(file.filename or "audio").name
+    suffix = Path(source_name).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=415, detail="Use MP3, WAV, M4A, FLAC, AAC, or OGG.")
     with jobs_lock:
@@ -155,29 +216,12 @@ async def create_job(
 
     job_id = uuid.uuid4().hex
     directory = _job_dir(job_id)
-    directory.mkdir(parents=True, exist_ok=False)
-    source = directory / f"source{suffix}"
-    size = 0
-    try:
-        with source.open("wb") as destination:
-            while chunk := await file.read(CHUNK_BYTES):
-                size += len(chunk)
-                if size > MAX_UPLOAD_BYTES:
-                    raise HTTPException(status_code=413, detail=f"Choose a file smaller than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.")
-                destination.write(chunk)
-    except Exception:
-        shutil.rmtree(directory, ignore_errors=True)
-        raise
-    finally:
-        await file.close()
-    if size == 0:
-        shutil.rmtree(directory, ignore_errors=True)
-        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    source = await _save_upload(file, directory, SUPPORTED_EXTENSIONS)
 
     now = time.time()
     job = Job(
         id=job_id,
-        source_name=Path(file.filename or "audio").name,
+        source_name=source_name,
         status="queued",
         progress=3,
         created_at=now,
@@ -187,6 +231,56 @@ async def create_job(
         jobs[job_id] = job
     executor.submit(_process_job, job_id, source)
     return _public_job(job)
+
+
+@app.post("/tools/extract-mp3")
+async def extract_mp3(
+    file: UploadFile = File(...),
+    x_stem_timestamp: str | None = Header(default=None),
+    x_stem_signature: str | None = Header(default=None),
+) -> FileResponse:
+    _verify_upload_token(x_stem_timestamp, x_stem_signature)
+    source_name = Path(file.filename or "video").name
+    directory = Path(tempfile.mkdtemp(prefix="stem-studio-extract-"))
+    source = await _save_upload(file, directory, SUPPORTED_VIDEO_EXTENSIONS)
+    output = directory / f"{Path(source_name).stem or 'video'}.mp3"
+    try:
+        await asyncio.to_thread(extract_audio_to_mp3, source, output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return FileResponse(
+        output,
+        media_type="audio/mpeg",
+        filename=output.name,
+        background=BackgroundTask(shutil.rmtree, directory, ignore_errors=True),
+    )
+
+
+@app.post("/tools/trim-merge")
+async def trim_merge(
+    file: UploadFile = File(...),
+    segments: str = Form(...),
+    x_stem_timestamp: str | None = Header(default=None),
+    x_stem_signature: str | None = Header(default=None),
+) -> FileResponse:
+    _verify_upload_token(x_stem_timestamp, x_stem_signature)
+    parsed_segments = _parse_segments(segments)
+    source_name = Path(file.filename or "audio").name
+    directory = Path(tempfile.mkdtemp(prefix="stem-studio-trim-"))
+    source = await _save_upload(file, directory, SUPPORTED_EXTENSIONS)
+    output = directory / f"{Path(source_name).stem or 'audio'}-trimmed.mp3"
+    try:
+        await asyncio.to_thread(trim_and_merge_audio, source, parsed_segments, output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return FileResponse(
+        output,
+        media_type="audio/mpeg",
+        filename=output.name,
+        background=BackgroundTask(shutil.rmtree, directory, ignore_errors=True),
+    )
 
 
 @app.get("/jobs/{job_id}")

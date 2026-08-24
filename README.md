@@ -1,6 +1,6 @@
 # Stem Studio
 
-Stem Studio turns a song into **instrumental/no-vocals**, **drums-only**, and **vocals-only** tracks. It also includes a local mixer for placing a separately recorded vocal over the instrumental with offset, trim, and gain controls.
+Stem Studio accepts audio or video, can extract a video's audio as MP3, keeps and joins multiple time ranges, and turns the active audio into **instrumental/no-vocals**, **drums-only**, and **vocals-only** tracks. It also includes a local mixer for placing a separately recorded vocal over the instrumental with offset, trim, and gain controls.
 
 ## Where it lives
 
@@ -19,15 +19,18 @@ The hosted stack is intentionally lean:
 ```text
 Vercel (Next.js interface)
   └── short-lived signed upload request
-                    │ direct audio upload
+                    │ direct media upload
                     ▼
-Modal (temporary Demucs job on a T4 GPU)
-  ├── one four-stem pass
+Modal (temporary FFmpeg tools + Demucs on a T4 GPU)
+  ├── video → MP3 (optional; CPU)
+  ├── ordered trim + merge → MP3 (optional; CPU)
+  ├── one four-stem pass (GPU)
   ├── vocals.wav
   ├── drums.wav
   └── instrumental.wav (drums + bass + other)
                     │
-                    └── preview/download; automatic deletion after one hour
+                    └── preview/download; temporary tool files are deleted
+                        immediately and stem jobs after one hour
 ```
 
 Vercel serves the interface but does not run Demucs. A full song can exceed the duration, memory, and package constraints of a free web function. Modal scales the processor to zero between jobs and provides $30/month of compute credit on its free Starter plan at the time this architecture was chosen.
@@ -82,7 +85,7 @@ modal secret create stem-studio-upload-secret PROCESSOR_SHARED_SECRET=PASTE_GENE
 modal deploy modal_app.py
 ```
 
-The deploy command prints the public processor URL. The first real job downloads the `htdemucs` model into the persistent `stem-studio-models` volume. Audio jobs are stored in a separate temporary volume and cleaned up after one hour.
+The deploy command prints the public processor URL. The first real isolation job downloads the `htdemucs` model into the persistent `stem-studio-models` volume. Stem jobs are stored in a separate temporary volume and cleaned up after one hour. Video conversion and trim/merge use FFmpeg in temporary container storage and delete their files as soon as the response finishes.
 
 ## Deploy the interface to Vercel
 
@@ -112,9 +115,13 @@ docker run --rm -p 8000:8000 \
 
 Use one container worker. The portable API keeps temporary job state in its local filesystem and is meant for a single-user MVP, not horizontal scaling.
 
-## Supported audio and controls
+## Hosted workflow and supported media
 
-- Inputs: MP3, WAV, M4A, FLAC, AAC, and OGG, up to 150 MB.
+- Audio inputs: MP3, WAV, M4A, FLAC, AAC, and OGG.
+- Video inputs: MP4, MOV, M4V, MKV, WEBM, and AVI. Extracting the first audio track to a 320 kbps MP3 is optional.
+- Upload limit: 150 MB per operation.
+- Trim and merge: add up to 50 ordered parts using raw seconds, `MM:SS`, or `HH:MM:SS`. An empty end uses the rest of the file; values beyond the duration are capped at the end.
+- The converted or trimmed MP3 becomes the active audio and can be previewed, downloaded, edited again, or isolated.
 - Outputs: instrumental/no-vocals, drums, and vocals as WAV, with browser preview and download.
 - Local mixing: manual vocal offset, trim start/end, vocal gain, instrumental gain, WAV preview, and WAV/320 kbps MP3 export.
 - Hosted retention: no account or permanent library; source and outputs expire after one hour.
@@ -139,6 +146,8 @@ Tests use generated tones; no copyrighted music or model weights are committed.
 - The first hosted job is slower because it downloads and caches the Demucs model and starts a new compute container.
 - Separation speed varies with song length and available hardware; a five-minute song is typically several minutes on CPU and materially faster on a T4 GPU.
 - Demucs can leave vocal bleed or musical artifacts, especially on dense mixes.
+- Video conversion uses the first audio track. Videos without audio cannot be converted.
+- Trim/merge is lossily exported as a 320 kbps MP3; repeated edits re-encode the active audio, so it is better to describe all desired parts in one merge when possible.
 - Hosted jobs are intentionally temporary. Refresh recovery works within the same browser session, but there is no long-term history.
 - Vocal recording/mixing is currently in the local Gradio app; the first hosted release focuses on the two highest-priority outputs: no-vocals and drums-only.
 

@@ -23,7 +23,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .button-primary { border:1px solid rgba(196,181,253,.2); color:white; background:linear-gradient(135deg,#7c3aed,#4f46e5); box-shadow:0 12px 30px rgba(79,70,229,.22); }
 .button-primary:hover:not(:disabled) { transform:translateY(-1px); filter:brightness(1.08); }
 .button-ghost { border:1px solid rgba(255,255,255,.12); color:#e2e8f0; background:rgba(255,255,255,.045); }
-.button-ghost:hover { background:rgba(255,255,255,.08); }
+.button-ghost:hover:not(:disabled) { background:rgba(255,255,255,.08); }
 .upload-zone { display:flex; min-height:11rem; width:100%; flex-direction:column; align-items:center; justify-content:center; gap:.7rem; border:1px dashed rgba(167,139,250,.38); border-radius:1.25rem; color:#a78bfa; background:rgba(124,58,237,.055); padding:1.25rem; text-align:center; transition:.2s ease; }
 .upload-zone:hover { border-color:rgba(167,139,250,.7); background:rgba(124,58,237,.09); }
 .job-card { border:1px solid rgba(255,255,255,.07); border-radius:1rem; background:rgba(2,6,23,.38); padding:1rem; }
@@ -37,3 +37,27 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .output-row audio { color-scheme:dark; }
 .password-input { width:100%; border:1px solid rgba(255,255,255,.1); border-radius:.85rem; outline:none; background:rgba(2,6,23,.45); padding:.75rem .9rem; font-size:.875rem; font-weight:400; letter-spacing:normal; color:white; }
 .password-input:focus { border-color:rgba(167,139,250,.65); box-shadow:0 0 0 3px rgba(124,58,237,.12); }
+.limit-pill { display:inline-flex; align-items:center; border:1px solid rgba(125,211,252,.15); border-radius:999px; background:rgba(14,165,233,.07); padding:.4rem .7rem; font-size:.7rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:#bae6fd; }
+.workflow-card { border:1px solid rgba(255,255,255,.075); border-radius:1.2rem; background:rgba(2,6,23,.33); padding:1rem; }
+.step-heading { display:flex; align-items:flex-start; gap:.8rem; }
+.step-heading h3 { font-size:.9rem; font-weight:650; color:#f8fafc; }
+.step-heading p { margin-top:.22rem; font-size:.75rem; line-height:1.25rem; color:#94a3b8; }
+.step-number { display:grid; height:1.75rem; min-width:1.75rem; place-items:center; border:1px solid rgba(167,139,250,.22); border-radius:.58rem; background:rgba(124,58,237,.13); font-size:.72rem; font-weight:750; color:#c4b5fd; }
+.media-preview { max-height:21rem; width:100%; border:1px solid rgba(255,255,255,.08); border-radius:.85rem; background:#020617; }
+.workflow-card audio { color-scheme:dark; }
+.part-row { display:grid; grid-template-columns:auto minmax(0,1fr) auto minmax(0,1fr) auto; align-items:end; gap:.55rem; border:1px solid rgba(255,255,255,.06); border-radius:.9rem; background:rgba(255,255,255,.022); padding:.75rem; }
+.part-label { align-self:center; font-size:.75rem; font-weight:700; color:#c4b5fd; }
+.part-row label { display:grid; gap:.3rem; font-size:.64rem; font-weight:700; letter-spacing:.09em; text-transform:uppercase; color:#64748b; }
+.part-row input { min-width:0; width:100%; border:1px solid rgba(255,255,255,.1); border-radius:.62rem; outline:none; background:rgba(2,6,23,.55); padding:.58rem .65rem; font-size:.8rem; font-weight:500; letter-spacing:normal; color:#f8fafc; }
+.part-row input:focus { border-color:rgba(167,139,250,.6); box-shadow:0 0 0 3px rgba(124,58,237,.1); }
+.part-arrow { align-self:center; color:#64748b; }
+.icon-button { display:grid; height:2.25rem; width:2.25rem; place-items:center; border:1px solid rgba(255,255,255,.08); border-radius:.6rem; color:#94a3b8; background:rgba(255,255,255,.035); }
+.icon-button:hover:not(:disabled) { border-color:rgba(251,113,133,.3); color:#fda4af; background:rgba(244,63,94,.08); }
+.status-message { border:1px solid rgba(167,139,250,.15); border-radius:.85rem; background:rgba(124,58,237,.07); padding:.8rem .9rem; font-size:.82rem; line-height:1.35rem; color:#ddd6fe; }
+@media (max-width: 560px) {
+  .part-row { grid-template-columns:auto 1fr auto; align-items:end; }
+  .part-label { grid-column:1 / 3; }
+  .part-row label { grid-column:auto; }
+  .part-arrow { display:none; }
+  .icon-button { grid-column:3; grid-row:2; }
+}

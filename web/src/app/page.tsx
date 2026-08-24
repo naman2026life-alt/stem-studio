@@ -1,4 +1,4 @@
-import { Clock3, Headphones, Music2, ShieldCheck } from "lucide-react";
+import { Film, Music2, Scissors, WandSparkles } from "lucide-react";
 
 import { Studio } from "@/components/studio";
 
@@ -26,17 +26,17 @@ export default function Home() {
             Pull the song apart.<br /><span className="gradient-text">Keep what you need.</span>
           </h1>
           <p className="mt-7 max-w-2xl text-pretty text-lg leading-8 text-slate-300">
-            Create a no-vocals track for singing, isolate drums for guitar practice, or save the vocals on their own.
+            Turn a video into MP3, keep and join the exact song sections you want, then create no-vocals, drums-only, and vocals-only tracks.
           </p>
         </div>
 
         <div className="mt-12 grid gap-4 sm:grid-cols-3">
           {[
-            [Headphones, "Three useful stems", "Instrumental, drums, and vocals from one upload."],
-            [ShieldCheck, "No cloud library", "Nothing is kept as a permanent account or archive."],
-            [Clock3, "Automatic cleanup", "Uploads and results expire one hour after processing."],
+            [Film, "Audio or video", "Upload common audio formats or extract an MP3 from video."],
+            [Scissors, "Trim and merge", "Keep multiple time ranges and join them in the order you choose."],
+            [WandSparkles, "Three useful stems", "Instrumental, drums, and vocals from the full or edited audio."],
           ].map(([Icon, title, text]) => {
-            const FeatureIcon = Icon as typeof Headphones;
+            const FeatureIcon = Icon as typeof Film;
             return (
               <article className="feature-card" key={title as string}>
                 <FeatureIcon size={20} className="text-violet-300" />

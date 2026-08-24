@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 import sys
 import tempfile
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 
 from pydub import AudioSegment
 
 SUPPORTED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg"}
+SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
+SUPPORTED_MEDIA_EXTENSIONS = SUPPORTED_EXTENSIONS | SUPPORTED_VIDEO_EXTENSIONS
 
 
 def validate_audio(path: str | Path) -> Path:
@@ -19,6 +23,98 @@ def validate_audio(path: str | Path) -> Path:
     if audio_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"Unsupported format: {audio_path.suffix}. Use MP3, WAV, M4A, FLAC, AAC, or OGG.")
     return audio_path
+
+
+def validate_media(path: str | Path) -> Path:
+    media_path = Path(path)
+    if not media_path.exists():
+        raise ValueError("Media file could not be found.")
+    if media_path.suffix.lower() not in SUPPORTED_MEDIA_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported format: {media_path.suffix}. Use a common audio file or MP4, MOV, M4V, MKV, WEBM, or AVI."
+        )
+    return media_path
+
+
+def media_kind(path: str | Path) -> str:
+    suffix = Path(path).suffix.lower()
+    if suffix in SUPPORTED_EXTENSIONS:
+        return "audio"
+    if suffix in SUPPORTED_VIDEO_EXTENSIONS:
+        return "video"
+    raise ValueError(f"Unsupported format: {suffix or 'unknown'}.")
+
+
+def _command_error(result: subprocess.CompletedProcess[str], fallback: str) -> RuntimeError:
+    detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else fallback
+    return RuntimeError(detail)
+
+
+def probe_duration_seconds(path: str | Path) -> float:
+    media_path = validate_media(path)
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(media_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        raise _command_error(result, "Could not read the media duration.")
+    try:
+        duration = float(result.stdout.strip())
+    except ValueError as exc:
+        raise RuntimeError("Could not read the media duration.") from exc
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError("The media file has no usable duration.")
+    return duration
+
+
+def extract_audio_to_mp3(source: str | Path, output_path: str | Path) -> Path:
+    source_path = validate_media(source)
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error", "-i", str(source_path),
+            "-map", "0:a:0", "-vn", "-c:a", "libmp3lame", "-b:a", "320k", str(destination),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        destination.unlink(missing_ok=True)
+        raise _command_error(result, "Could not extract an audio track from this video.")
+    return destination
+
+
+def trim_and_merge_audio(
+    source: str | Path,
+    segments: Sequence[tuple[float, float | None]],
+    output_path: str | Path,
+) -> Path:
+    source_path = validate_audio(source)
+    if not segments:
+        raise ValueError("Add at least one part to trim and merge.")
+    audio = AudioSegment.from_file(source_path)
+    duration_seconds = len(audio) / 1000
+    merged = AudioSegment.empty()
+    for index, (raw_start, raw_end) in enumerate(segments, start=1):
+        start = float(raw_start)
+        end = duration_seconds if raw_end is None else float(raw_end)
+        if not math.isfinite(start) or not math.isfinite(end):
+            raise ValueError(f"Part {index} has an invalid time value.")
+        start = min(duration_seconds, max(0, start))
+        end = min(duration_seconds, max(0, end))
+        if end <= start:
+            raise ValueError(f"Part {index} must end after it starts.")
+        merged += audio[round(start * 1000):round(end * 1000)]
+
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    merged.export(destination, format="mp3", bitrate="320k")
+    return destination
 
 
 def run_demucs(source: str | Path, output_root: str | Path, model: str = "htdemucs") -> dict[str, Path]:
