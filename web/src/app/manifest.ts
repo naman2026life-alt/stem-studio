@@ -4,7 +4,7 @@ export default function manifest(): MetadataRoute.Manifest {
   return {
     name: "Stem Studio",
     short_name: "Stem Studio",
-    description: "Record, edit, and separate music into instrumental, drums, and vocals.",
+    description: "Record or edit audio, remove vocals for karaoke, and separate music into useful tracks.",
     start_url: "/",
     display: "standalone",
     background_color: "#070913",

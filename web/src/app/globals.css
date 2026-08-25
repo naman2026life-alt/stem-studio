@@ -59,6 +59,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .progress-track span { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,#8b5cf6,#38bdf8); transition:width .45s ease; }
 .notice-card { border:1px solid rgba(251,191,36,.16); border-radius:1rem; background:rgba(245,158,11,.07); padding:1rem; }
 .output-row { display:flex; flex-wrap:wrap; align-items:center; gap:.7rem; border:1px solid rgba(255,255,255,.06); border-radius:.85rem; background:rgba(255,255,255,.025); padding:.7rem; }
+.output-row.karaoke-result { border-color:rgba(52,211,153,.17); background:linear-gradient(145deg,rgba(16,185,129,.065),rgba(124,58,237,.035)); }
 .output-row audio { color-scheme:dark; }
 .active-audio-actions { display:flex; flex-wrap:wrap; align-items:flex-start; gap:.65rem; }
 .active-audio-actions > .export-panel { flex:1 1 24rem; }
@@ -95,6 +96,21 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .step-heading h3 { font-size:.9rem; font-weight:650; color:#f8fafc; }
 .step-heading p { margin-top:.22rem; font-size:.75rem; line-height:1.25rem; color:#94a3b8; }
 .step-number { display:grid; height:1.75rem; min-width:1.75rem; place-items:center; border:1px solid rgba(167,139,250,.22); border-radius:.58rem; background:rgba(124,58,237,.13); font-size:.72rem; font-weight:750; color:#c4b5fd; }
+.active-source-chip { display:flex; min-width:0; align-items:center; gap:.65rem; border:1px solid rgba(125,211,252,.12); border-radius:.8rem; background:rgba(14,165,233,.045); padding:.65rem .75rem; color:#7dd3fc; }
+.active-source-chip span { display:grid; min-width:0; gap:.12rem; }
+.active-source-chip small { font-size:.62rem; line-height:.9rem; color:#64748b; }
+.active-source-chip strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.75rem; font-weight:650; color:#cbd5e1; }
+.separation-mode-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.7rem; }
+.separation-mode-card { display:grid; min-width:0; min-height:13rem; grid-template-rows:auto 1fr auto; gap:.85rem; border:1px solid rgba(255,255,255,.08); border-radius:1rem; background:rgba(255,255,255,.025); padding:.9rem; }
+.separation-mode-card.is-karaoke { border-color:rgba(52,211,153,.2); background:linear-gradient(145deg,rgba(16,185,129,.09),rgba(124,58,237,.055)); box-shadow:inset 0 1px 0 rgba(255,255,255,.035); }
+.separation-mode-topline { display:flex; align-items:center; justify-content:space-between; gap:.6rem; }
+.separation-mode-icon { display:grid; height:2.3rem; width:2.3rem; place-items:center; border:1px solid rgba(196,181,253,.15); border-radius:.75rem; background:rgba(124,58,237,.09); color:#c4b5fd; }
+.is-karaoke .separation-mode-icon { border-color:rgba(110,231,183,.18); background:rgba(16,185,129,.1); color:#a7f3d0; }
+.separation-mode-badge { display:inline-flex; align-items:center; border:1px solid rgba(110,231,183,.18); border-radius:999px; background:rgba(16,185,129,.08); padding:.3rem .48rem; font-size:.56rem; font-weight:750; letter-spacing:.07em; text-transform:uppercase; color:#a7f3d0; }
+.separation-mode-badge.is-muted { border-color:rgba(148,163,184,.13); background:rgba(148,163,184,.055); color:#94a3b8; }
+.separation-mode-card h4 { font-size:.88rem; font-weight:700; color:#f8fafc; }
+.separation-mode-card p { margin-top:.28rem; font-size:.7rem; line-height:1.15rem; color:#94a3b8; }
+.separation-mode-card button { min-height:2.85rem; }
 .media-preview { max-height:21rem; width:100%; border:1px solid rgba(255,255,255,.08); border-radius:.85rem; background:#020617; }
 .workflow-card audio { color-scheme:dark; }
 .part-row { display:grid; grid-template-columns:auto minmax(0,1fr) auto minmax(0,1fr) auto; align-items:end; gap:.55rem; border:1px solid rgba(255,255,255,.06); border-radius:.9rem; background:rgba(255,255,255,.022); padding:.75rem; }
@@ -156,6 +172,8 @@ button:disabled { cursor: not-allowed; opacity: .52; }
   .status-pill { display:none; }
   .feature-card { min-height:0; padding:1.05rem; }
   .source-choice-grid { grid-template-columns:1fr; }
+  .separation-mode-grid { grid-template-columns:1fr; }
+  .separation-mode-card { min-height:0; }
   .upload-zone,.recorder-zone { min-height:10.5rem; border-radius:1rem; padding:1rem; }
   .button-primary,.button-ghost { min-height:2.75rem; }
   .export-actions { width:100%; }

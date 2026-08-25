@@ -13,6 +13,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -49,6 +50,7 @@ class Job:
     vocals_url: str | None = None
     drums_url: str | None = None
     instrumental_url: str | None = None
+    mode: Literal["stems", "karaoke"] = "stems"
 
 
 jobs: dict[str, Job] = {}
@@ -170,24 +172,29 @@ def _set_job(job_id: str, **values: object) -> None:
                 setattr(job, key, value)
 
 
-def _process_job(job_id: str, source: Path) -> None:
+def _process_job(job_id: str, source: Path, mode: Literal["stems", "karaoke"] = "stems") -> None:
     try:
         _set_job(job_id, status="processing", progress=8)
-        outputs = run_demucs(source, _job_dir(job_id) / "separated")
-        _set_job(job_id, progress=90)
-        output_dir = _job_dir(job_id) / "outputs"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        urls: dict[str, str] = {}
-        for stem, source_path in outputs.items():
-            destination = output_dir / f"{stem}.wav"
-            shutil.move(str(source_path), destination)
-            try:
-                transcode_audio_to_mp3(destination, output_dir / f"{stem}.mp3")
-            except (OSError, RuntimeError, ValueError):
-                # The WAV is the canonical result; the UI can fall back to it if
-                # the smaller convenience copy cannot be encoded.
-                pass
-            urls[f"{stem}_url"] = f"/jobs/{job_id}/files/{stem}"
+        with tempfile.TemporaryDirectory(prefix="separated-", dir=_job_dir(job_id)) as temporary:
+            outputs = run_demucs(
+                source,
+                Path(temporary),
+                karaoke_only=mode == "karaoke",
+            )
+            _set_job(job_id, progress=90)
+            output_dir = _job_dir(job_id) / "outputs"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            urls: dict[str, str] = {}
+            for stem, source_path in outputs.items():
+                destination = output_dir / f"{stem}.wav"
+                shutil.move(str(source_path), destination)
+                try:
+                    transcode_audio_to_mp3(destination, output_dir / f"{stem}.mp3")
+                except (OSError, RuntimeError, ValueError):
+                    # The WAV is the canonical result; the UI can fall back to it if
+                    # the smaller convenience copy cannot be encoded.
+                    pass
+                urls[f"{stem}_url"] = f"/jobs/{job_id}/files/{stem}"
         source.unlink(missing_ok=True)
         _set_job(job_id, status="completed", progress=100, **urls)
     except Exception as exc:
@@ -206,6 +213,7 @@ def health() -> dict[str, object]:
 @app.post("/jobs", status_code=202)
 async def create_job(
     file: UploadFile = File(...),
+    mode: str = Form("stems"),
     x_stem_timestamp: str | None = Header(default=None),
     x_stem_signature: str | None = Header(default=None),
 ) -> dict[str, object]:
@@ -216,6 +224,9 @@ async def create_job(
     suffix = Path(source_name).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=415, detail="Use MP3, WAV, M4A, FLAC, AAC, OGG, or WEBM audio.")
+    if mode not in {"stems", "karaoke"}:
+        raise HTTPException(status_code=422, detail="Choose either stems or karaoke mode.")
+    validated_mode: Literal["stems", "karaoke"] = "karaoke" if mode == "karaoke" else "stems"
     with jobs_lock:
         pending = sum(job.status in {"queued", "processing"} for job in jobs.values())
     if pending >= MAX_PENDING_JOBS:
@@ -229,6 +240,7 @@ async def create_job(
     job = Job(
         id=job_id,
         source_name=source_name,
+        mode=validated_mode,
         status="queued",
         progress=3,
         created_at=now,
@@ -236,7 +248,7 @@ async def create_job(
     )
     with jobs_lock:
         jobs[job_id] = job
-    executor.submit(_process_job, job_id, source)
+    executor.submit(_process_job, job_id, source, validated_mode)
     return _public_job(job)
 
 
@@ -313,7 +325,8 @@ def download_stem(job_id: str, stem: str) -> FileResponse:
     if not path.exists():
         raise HTTPException(status_code=404, detail="This output expired or could not be found.")
     safe_name = Path(job.source_name).stem or "song"
-    return FileResponse(path, media_type="audio/wav", filename=f"{safe_name}-{stem}.wav")
+    output_name = "karaoke" if job.mode == "karaoke" and stem == "instrumental" else stem
+    return FileResponse(path, media_type="audio/wav", filename=f"{safe_name}-{output_name}.wav")
 
 
 @app.get("/jobs/{job_id}/share/{stem}")
@@ -329,4 +342,5 @@ def share_stem(job_id: str, stem: str) -> FileResponse:
     if not path.exists():
         raise HTTPException(status_code=404, detail="This share file expired or could not be found.")
     safe_name = Path(job.source_name).stem or "song"
-    return FileResponse(path, media_type="audio/mpeg", filename=f"{safe_name}-{stem}.mp3")
+    output_name = "karaoke" if job.mode == "karaoke" and stem == "instrumental" else stem
+    return FileResponse(path, media_type="audio/mpeg", filename=f"{safe_name}-{output_name}.mp3")

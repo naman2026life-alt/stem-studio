@@ -1,4 +1,5 @@
 -r requirements-processor.txt
+-r requirements-modal.txt
 gradio>=5.0,<7
 httpx>=0.28,<1
 pytest>=8,<9

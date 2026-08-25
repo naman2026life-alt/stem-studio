@@ -11,6 +11,7 @@ import {
   LoaderCircle,
   LockKeyhole,
   Mic,
+  MicOff,
   Music,
   Pause,
   Play,
@@ -26,7 +27,7 @@ import {
 
 import { DurationPicker } from "@/components/duration-picker";
 import { ExportActions } from "@/components/export-actions";
-import type { SeparationJob } from "@/lib/types";
+import type { SeparationJob, SeparationMode } from "@/lib/types";
 
 const AUDIO_EXTENSIONS = /\.(mp3|wav|m4a|flac|aac|ogg|webm)$/i;
 const VIDEO_EXTENSIONS = /\.(mp4|mov|m4v|mkv|webm|avi)$/i;
@@ -39,7 +40,7 @@ const MAX_BYTES = 150 * 1024 * 1024;
 const SESSION_KEY = "stem-studio-job-ids";
 
 type MediaKind = "audio" | "video";
-type BusyAction = "convert" | "trim" | "separate" | null;
+type BusyAction = "convert" | "trim" | SeparationMode | null;
 type ProtectedAction = Exclude<BusyAction, null>;
 type RecordingState = "idle" | "requesting" | "recording" | "paused" | "processing";
 type TrimPart = { id: number; start: string; end: string };
@@ -134,10 +135,16 @@ function outputUrl(processorUrl: string, path: string) {
   return new URL(path, `${processorUrl}/`).toString();
 }
 
-function stemFileName(sourceName: string, stem: "instrumental" | "drums" | "vocals") {
+function stemFileName(
+  sourceName: string,
+  stem: "instrumental" | "drums" | "vocals",
+  mode: SeparationJob["mode"],
+  extension: "mp3" | "wav",
+) {
   const leafName = sourceName.split(/[\\/]/).pop() || "track";
   const baseName = leafName.replace(/\.[^.]+$/, "") || "track";
-  return `${baseName}-${stem}.wav`;
+  const outputName = mode === "karaoke" && stem === "instrumental" ? "karaoke" : stem;
+  return `${baseName}-${outputName}.${extension}`;
 }
 
 function parseUploadError(xhr: XMLHttpRequest) {
@@ -575,21 +582,22 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     setMessage("Restored the full audio file.");
   }
 
-  async function queueSeparation(password?: string) {
+  async function queueSeparation(mode: SeparationMode, password?: string) {
     if (!workingAudio || !processorUrl) return;
-    setBusyAction("separate");
+    setBusyAction(mode);
     setMessage("Preparing the secure audio upload…");
     try {
       const token = await requestToken(password);
       const form = new FormData();
       form.append("file", workingAudio);
+      form.append("mode", mode);
 
       const job = await new Promise<SeparationJob>((resolve, reject) => {
         const upload = new XMLHttpRequest();
         upload.open("POST", `${processorUrl}/jobs`);
         for (const [name, value] of Object.entries(tokenHeaders(token))) upload.setRequestHeader(name, value);
         upload.upload.onprogress = (event) => {
-          if (event.lengthComputable) setMessage(`Uploading for isolation… ${Math.round((event.loaded / event.total) * 100)}%`);
+          if (event.lengthComputable) setMessage(`Uploading for ${mode === "karaoke" ? "karaoke mode" : "isolation"}… ${Math.round((event.loaded / event.total) * 100)}%`);
         };
         upload.onerror = () => reject(new Error("Could not reach the audio processor."));
         upload.onload = () => {
@@ -600,7 +608,9 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       });
 
       rememberJobs([job, ...jobs.filter((item) => item.id !== job.id)]);
-      setMessage("Uploaded. Instrumental, drums, and vocals are now being isolated.");
+      setMessage(mode === "karaoke"
+        ? "Uploaded. Your no-vocals karaoke track is now being created."
+        : "Uploaded. Instrumental, drums, and vocals are now being isolated.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Upload failed. Please retry.");
     } finally {
@@ -611,7 +621,8 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   function executeAction(action: ProtectedAction, password?: string) {
     if (action === "convert") void convertVideo(password);
     if (action === "trim") void trimAndMerge(password);
-    if (action === "separate") void queueSeparation(password);
+    if (action === "stems") void queueSeparation("stems", password);
+    if (action === "karaoke") void queueSeparation("karaoke", password);
   }
 
   function runProtectedAction(action: ProtectedAction) {
@@ -840,17 +851,57 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
           <section className="workflow-card mt-5" aria-labelledby="isolate-heading">
             <div className="step-heading">
               <span className="step-number">{sourceKind === "video" ? "4" : "3"}</span>
-              <div><h3 id="isolate-heading">Isolate three useful tracks</h3><p>Use the active audio above—full or edited—to create instrumental, drums, and vocals.</p></div>
+              <div><h3 id="isolate-heading">Choose what to create</h3><p>Make one karaoke track with the vocals removed, or split the audio into all three useful tracks.</p></div>
             </div>
-            <button
-              className="button-primary mt-4 w-full justify-center"
-              disabled={busy || !configured}
-              onClick={() => runProtectedAction("separate")}
-              type="button"
-            >
-              {busyAction === "separate" ? <LoaderCircle className="animate-spin" size={18} /> : <WandSparkles size={18} />}
-              {busyAction === "separate" ? "Uploading…" : "Isolate instrumental, drums & vocals"}
-            </button>
+            <div className="active-source-chip mt-4">
+              <FileAudio size={16} />
+              <span>
+                <small>{workingState === "edited" ? "Using trimmed & merged audio" : workingState === "converted" ? "Using audio from video" : "Using full audio"}</small>
+                <strong>{workingAudio.name}</strong>
+              </span>
+            </div>
+            <div className="separation-mode-grid mt-3">
+              <article className="separation-mode-card is-karaoke">
+                <div className="separation-mode-topline">
+                  <span className="separation-mode-icon"><MicOff size={20} /></span>
+                  <span className="separation-mode-badge">Best for singing</span>
+                </div>
+                <div>
+                  <h4>Karaoke mode</h4>
+                  <p>Remove detected vocals and keep the music as one ready-to-sing backing track.</p>
+                </div>
+                <button
+                  aria-label={`Remove vocals from ${workingAudio.name} and make a karaoke track`}
+                  className="button-primary w-full justify-center"
+                  disabled={busy || !configured}
+                  onClick={() => runProtectedAction("karaoke")}
+                  type="button"
+                >
+                  {busyAction === "karaoke" ? <LoaderCircle className="animate-spin" size={18} /> : <MicOff size={18} />}
+                  {busyAction === "karaoke" ? "Uploading…" : "Make karaoke track"}
+                </button>
+              </article>
+              <article className="separation-mode-card">
+                <div className="separation-mode-topline">
+                  <span className="separation-mode-icon"><WandSparkles size={20} /></span>
+                  <span className="separation-mode-badge is-muted">Full split</span>
+                </div>
+                <div>
+                  <h4>All 3 tracks</h4>
+                  <p>Create instrumental/no-vocals, drums-only, and vocals-only files together.</p>
+                </div>
+                <button
+                  aria-label={`Create instrumental, drums, and vocals tracks from ${workingAudio.name}`}
+                  className="button-ghost w-full justify-center"
+                  disabled={busy || !configured}
+                  onClick={() => runProtectedAction("stems")}
+                  type="button"
+                >
+                  {busyAction === "stems" ? <LoaderCircle className="animate-spin" size={18} /> : <WandSparkles size={18} />}
+                  {busyAction === "stems" ? "Uploading…" : "Create all 3 tracks"}
+                </button>
+              </article>
+            </div>
             {accessProtected && !accessVerified && <p className="processing-hint"><LockKeyhole size={13} />Private processing—password requested after you tap.</p>}
           </section>
         )}
@@ -866,50 +917,73 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
 
       <article className="glass self-start rounded-[2rem] p-6 sm:p-8">
         <div className="flex items-end justify-between gap-4">
-          <div><p className="eyebrow">Temporary results</p><h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">Your isolation jobs</h2></div>
+          <div><p className="eyebrow">Temporary results</p><h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">Your processed audio</h2></div>
           {jobs.length > 0 && <button className="text-sm text-violet-300 hover:text-violet-200" onClick={() => void refreshJobs()} type="button">Refresh</button>}
         </div>
         <div className="mt-6 space-y-3">
-          {jobs.length === 0 && <div className="empty-state"><FileAudio size={28} /><p>Your first set of stems will appear here.</p></div>}
-          {jobs.map((job) => (
-            <div className="job-card" key={job.id}>
-              <div className="flex min-w-0 items-start gap-3">
-                <StatusIcon status={job.status} />
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-white">{job.source_name}</p>
-                  <p className="mt-1 text-xs capitalize text-slate-400">{job.status} · {job.progress}% · {formatDate(job.created_at)}</p>
-                  {job.error && <p className="mt-2 text-xs leading-5 text-rose-300">{job.error}</p>}
+          {jobs.length === 0 && <div className="empty-state"><FileAudio size={28} /><p>Your karaoke tracks and stems will appear here.</p></div>}
+          {jobs.map((job) => {
+            const jobMode: SeparationMode = job.mode === "karaoke" ? "karaoke" : "stems";
+            const resultStems: readonly ("instrumental" | "drums" | "vocals")[] = jobMode === "karaoke"
+              ? ["instrumental"]
+              : ["instrumental", "drums", "vocals"];
+            return (
+              <div className="job-card" key={job.id}>
+                <div className="flex min-w-0 items-start gap-3">
+                  <StatusIcon status={job.status} />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-white">{job.source_name}</p>
+                    <p aria-live="polite" className="mt-1 text-xs capitalize text-slate-400">{jobMode === "karaoke" ? "Karaoke" : "3 tracks"} · {job.status} · {job.progress}% · {formatDate(job.created_at)}</p>
+                    {job.error && <p className="mt-2 text-xs leading-5 text-rose-300">{job.error}</p>}
+                  </div>
                 </div>
+                {job.status === "completed" && (
+                  <div className="mt-5 grid gap-3">
+                    {resultStems.map((stem) => {
+                      const path = job[`${stem}_url`];
+                      if (!path) return null;
+                      const url = outputUrl(processorUrl, path);
+                      const label = jobMode === "karaoke" && stem === "instrumental"
+                        ? "Karaoke track · vocals removed"
+                        : stem === "instrumental" ? "Instrumental / no vocals" : stem[0].toUpperCase() + stem.slice(1);
+                      return (
+                        <div className={`output-row ${jobMode === "karaoke" ? "karaoke-result" : ""}`} key={stem}>
+                          <div className="flex items-center gap-2 text-sm font-medium text-slate-200"><Music size={14} />{label}</div>
+                          <audio aria-label={`${label} preview for ${job.source_name}`} className="h-9 min-w-0 flex-1" controls preload="none" src={url} />
+                          <ExportActions
+                            compact
+                            fileName={stemFileName(job.source_name, stem, jobMode, "wav")}
+                            mimeType="audio/wav"
+                            remoteUrl={url}
+                            shareFileName={stemFileName(job.source_name, stem, jobMode, "mp3")}
+                            shareMimeType="audio/mpeg"
+                            shareRemoteUrl={outputUrl(processorUrl, `/jobs/${job.id}/share/${stem}`)}
+                          />
+                        </div>
+                      );
+                    })}
+                    <p className="text-xs leading-5 text-slate-500">
+                      {jobMode === "karaoke"
+                        ? "Your karaoke track is ready to preview, save, or share. Save it before this temporary job expires."
+                        : "Save these files before this temporary job expires. Share opens your device’s share sheet with the audio attached—choose WhatsApp and a chat."}
+                    </p>
+                  </div>
+                )}
+                {(job.status === "queued" || job.status === "processing") && (
+                  <div
+                    aria-label={`${jobMode === "karaoke" ? "Karaoke" : "Stem separation"} progress`}
+                    aria-valuemax={100}
+                    aria-valuemin={0}
+                    aria-valuenow={job.progress}
+                    className="progress-track mt-4"
+                    role="progressbar"
+                  >
+                    <span style={{ width: `${Math.max(job.progress, 4)}%` }} />
+                  </div>
+                )}
               </div>
-              {job.status === "completed" && (
-                <div className="mt-5 grid gap-3">
-                  {(["instrumental", "drums", "vocals"] as const).map((stem) => {
-                    const path = job[`${stem}_url`];
-                    if (!path) return null;
-                    const url = outputUrl(processorUrl, path);
-                    const label = stem === "instrumental" ? "Instrumental / no vocals" : stem[0].toUpperCase() + stem.slice(1);
-                    return (
-                      <div className="output-row" key={stem}>
-                        <div className="flex items-center gap-2 text-sm font-medium text-slate-200"><Music size={14} />{label}</div>
-                        <audio className="h-9 min-w-0 flex-1" controls preload="none" src={url} />
-                        <ExportActions
-                          compact
-                          fileName={stemFileName(job.source_name, stem)}
-                          mimeType="audio/wav"
-                          remoteUrl={url}
-                          shareFileName={stemFileName(job.source_name, stem).replace(/\.wav$/, ".mp3")}
-                          shareMimeType="audio/mpeg"
-                          shareRemoteUrl={outputUrl(processorUrl, `/jobs/${job.id}/share/${stem}`)}
-                        />
-                      </div>
-                    );
-                  })}
-                  <p className="text-xs leading-5 text-slate-500">Save these files before this temporary job expires. Share opens your device’s share sheet with the audio attached—choose WhatsApp and a chat.</p>
-                </div>
-              )}
-              {(job.status === "queued" || job.status === "processing") && <div className="progress-track mt-4"><span style={{ width: `${Math.max(job.progress, 4)}%` }} /></div>}
-            </div>
-          ))}
+            );
+          })}
         </div>
       </article>
 
@@ -927,7 +1001,13 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
             <span className="unlock-icon"><LockKeyhole size={22} /></span>
             <h2 id="unlock-title">Unlock private processing</h2>
             <p id="unlock-description">
-              Enter the Stem Studio password to {pendingAction === "trim" ? "trim and merge these parts" : pendingAction === "convert" ? "convert this video" : "isolate this audio"}. It protects your Modal credits from public use.
+              Enter the Stem Studio password to {pendingAction === "trim"
+                ? "trim and merge these parts"
+                : pendingAction === "convert"
+                  ? "convert this video"
+                  : pendingAction === "karaoke"
+                    ? "remove the vocals and make a karaoke track"
+                    : "create all three isolated tracks"}. It protects your Modal credits from public use.
             </p>
             <label>
               Studio password

@@ -140,14 +140,22 @@ def trim_and_merge_audio(
     return destination
 
 
-def run_demucs(source: str | Path, output_root: str | Path, model: str = "htdemucs") -> dict[str, Path]:
+def run_demucs(
+    source: str | Path,
+    output_root: str | Path,
+    model: str = "htdemucs",
+    karaoke_only: bool = False,
+) -> dict[str, Path]:
     source = validate_audio(source)
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     model_cache = Path(os.environ.get("TORCH_HOME", Path(__file__).resolve().parent.parent / ".model-cache"))
     model_cache.mkdir(parents=True, exist_ok=True)
     demucs_env = {**os.environ, "TORCH_HOME": str(model_cache)}
-    command = [sys.executable, "-m", "demucs", "-n", model, "-o", str(output_root), str(source)]
+    command = [sys.executable, "-m", "demucs", "-n", model, "-o", str(output_root)]
+    if karaoke_only:
+        command.extend(["--two-stems", "vocals"])
+    command.append(str(source))
     result = subprocess.run(command, capture_output=True, text=True, env=demucs_env)
     if result.returncode:
         detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Unknown Demucs error"
@@ -155,6 +163,12 @@ def run_demucs(source: str | Path, output_root: str | Path, model: str = "htdemu
 
     stem_dir = output_root / model / source.stem
     vocals = stem_dir / "vocals.wav"
+    no_vocals = stem_dir / "no_vocals.wav"
+    if karaoke_only:
+        if not no_vocals.exists():
+            raise RuntimeError("Demucs finished, but the karaoke output was not created.")
+        return {"instrumental": no_vocals}
+
     drums = stem_dir / "drums.wav"
     bass = stem_dir / "bass.wav"
     other = stem_dir / "other.wav"
@@ -162,7 +176,6 @@ def run_demucs(source: str | Path, output_root: str | Path, model: str = "htdemu
         raise RuntimeError("Demucs finished, but expected output files were not created.")
 
     # A single four-stem pass is considerably faster than running two separate models.
-    no_vocals = stem_dir / "no_vocals.wav"
     instrumental = AudioSegment.from_file(drums)
     instrumental = instrumental.overlay(AudioSegment.from_file(bass))
     instrumental = instrumental.overlay(AudioSegment.from_file(other))

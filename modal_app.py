@@ -54,11 +54,14 @@ def _write_status(job_id: str, **values: object) -> dict[str, object]:
 
 def _public_status(job: dict[str, object]) -> dict[str, object]:
     expires_at = float(job["expires_at"])
-    return {
+    public = {
         key: value
         for key, value in job.items()
         if key not in {"expires_at", "call_id"}
-    } | {"expires_in_seconds": max(0, round(expires_at - time.time()))}
+    }
+    # Jobs created before Karaoke mode did not include this field.
+    public.setdefault("mode", "stems")
+    return public | {"expires_in_seconds": max(0, round(expires_at - time.time()))}
 
 
 def _verify_upload_token(timestamp: str | None, signature: str | None) -> None:
@@ -109,7 +112,7 @@ def _parse_segments(value: str) -> list[tuple[float, float | None]]:
     scaledown_window=15,
     volumes={str(DATA_ROOT): data_volume, str(MODEL_ROOT): model_volume},
 )
-def separate(job_id: str) -> None:
+def separate(job_id: str, mode: str = "stems") -> None:
     from stem_studio.audio import run_demucs, transcode_audio_to_mp3
 
     job_dir = _job_dir(job_id)
@@ -118,7 +121,11 @@ def separate(job_id: str) -> None:
         _write_status(job_id, status="processing", progress=8)
         data_volume.commit()
         with tempfile.TemporaryDirectory(prefix=f"stem-studio-{job_id[:8]}-") as temporary:
-            outputs = run_demucs(source, Path(temporary) / "separated")
+            outputs = run_demucs(
+                source,
+                Path(temporary) / "separated",
+                karaoke_only=mode == "karaoke",
+            )
             _write_status(job_id, progress=90)
             output_dir = job_dir / "outputs"
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -199,6 +206,7 @@ def web():
     @web_app.post("/jobs", status_code=202)
     async def create_job(
         file: UploadFile = File(...),
+        mode: str = Form("stems"),
         x_stem_timestamp: str | None = Header(default=None),
         x_stem_signature: str | None = Header(default=None),
     ):
@@ -208,6 +216,8 @@ def web():
         suffix = Path(file.filename or "").suffix.lower()
         if suffix not in SUPPORTED_EXTENSIONS:
             raise HTTPException(status_code=415, detail="Use MP3, WAV, M4A, FLAC, AAC, OGG, or WEBM audio.")
+        if mode not in {"stems", "karaoke"}:
+            raise HTTPException(status_code=422, detail="Choose either stems or karaoke mode.")
 
         source_name = Path(file.filename or "audio").name
         job_id = uuid.uuid4().hex
@@ -219,6 +229,7 @@ def web():
             job_id,
             id=job_id,
             source_name=source_name,
+            mode=mode,
             status="queued",
             progress=3,
             created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -229,7 +240,7 @@ def web():
             instrumental_url=None,
         )
         await data_volume.commit.aio()
-        call = await separate.spawn.aio(job_id)
+        call = await separate.spawn.aio(job_id, mode)
         _write_status(job_id, call_id=call.object_id)
         await data_volume.commit.aio()
         return _public_status(status)
@@ -311,7 +322,8 @@ def web():
             raise HTTPException(status_code=404, detail="This output expired or could not be found.")
         status = json.loads(_status_path(job_id).read_text())
         safe_name = Path(str(status["source_name"])).stem or "song"
-        return FileResponse(path, media_type="audio/wav", filename=f"{safe_name}-{stem}.wav")
+        output_name = "karaoke" if status.get("mode") == "karaoke" and stem == "instrumental" else stem
+        return FileResponse(path, media_type="audio/wav", filename=f"{safe_name}-{output_name}.wav")
 
     @web_app.get("/jobs/{job_id}/share/{stem}")
     async def share_stem(job_id: str, stem: str):
@@ -324,7 +336,8 @@ def web():
             raise HTTPException(status_code=404, detail="This share file expired or could not be found.")
         status = json.loads(_status_path(job_id).read_text())
         safe_name = Path(str(status["source_name"])).stem or "song"
-        return FileResponse(path, media_type="audio/mpeg", filename=f"{safe_name}-{stem}.mp3")
+        output_name = "karaoke" if status.get("mode") == "karaoke" and stem == "instrumental" else stem
+        return FileResponse(path, media_type="audio/mpeg", filename=f"{safe_name}-{output_name}.mp3")
 
     return web_app
 

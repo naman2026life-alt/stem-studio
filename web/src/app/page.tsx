@@ -1,4 +1,4 @@
-import { Film, Music2, Scissors, WandSparkles } from "lucide-react";
+import { Film, MicOff, Music2, Scissors } from "lucide-react";
 
 import { Studio } from "@/components/studio";
 
@@ -26,7 +26,7 @@ export default function Home() {
             Pull the song apart.<br /><span className="gradient-text">Keep what you need.</span>
           </h1>
           <p className="mt-7 max-w-2xl text-pretty text-lg leading-8 text-slate-300">
-            Record a new take or bring your audio or video, keep the exact sections you want, then create no-vocals, drums-only, and vocals-only tracks.
+            Record a new take or bring your audio or video, keep the exact sections you want, then remove the vocals for karaoke—or create instrumental, drums-only, and vocals-only tracks.
           </p>
         </div>
 
@@ -34,7 +34,7 @@ export default function Home() {
           {[
             [Film, "Record or upload", "Use your microphone directly or choose existing audio or video."],
             [Scissors, "Trim and merge", "Keep multiple time ranges and join them in the order you choose."],
-            [WandSparkles, "Three useful stems", "Instrumental, drums, and vocals from the full or edited audio."],
+            [MicOff, "Karaoke or full split", "Remove vocals in one tap, or create instrumental, drums, and vocals."],
           ].map(([Icon, title, text]) => {
             const FeatureIcon = Icon as typeof Film;
             return (

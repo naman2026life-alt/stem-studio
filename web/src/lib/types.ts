@@ -1,6 +1,9 @@
+export type SeparationMode = "stems" | "karaoke";
+
 export type SeparationJob = {
   id: string;
   source_name: string;
+  mode?: SeparationMode;
   status: "queued" | "processing" | "completed" | "failed";
   progress: number;
   created_at: string;

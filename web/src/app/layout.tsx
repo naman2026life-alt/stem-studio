@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Stem Studio — Separate vocals, drums, and instrumentals",
-  description: "Create vocals, drums, and instrumental stems in a temporary audio workspace.",
+  title: "Stem Studio — Remove vocals and separate music",
+  description: "Make a karaoke track by removing vocals, or create vocals, drums, and instrumental stems.",
   applicationName: "Stem Studio",
   appleWebApp: {
     capable: true,
