@@ -48,8 +48,10 @@ security add-generic-password \
 
 mkdir -p "${launch_agents_directory}" "${logs_directory}"
 install -m 600 "${template_path}" "${plist_path}"
-plutil -replace ProgramArguments.0 -string "${python_path}" "${plist_path}"
-plutil -replace ProgramArguments.4 -string "${broker_url}" "${plist_path}"
+plutil -remove ProgramArguments.0 "${plist_path}"
+plutil -insert ProgramArguments.0 -string "${python_path}" "${plist_path}"
+plutil -remove ProgramArguments.4 "${plist_path}"
+plutil -insert ProgramArguments.4 -string "${broker_url}" "${plist_path}"
 plutil -replace WorkingDirectory -string "${project_directory}" "${plist_path}"
 plutil -replace StandardOutPath -string "${logs_directory}/StemStudioHelper.log" "${plist_path}"
 plutil -replace StandardErrorPath -string "${logs_directory}/StemStudioHelper.error.log" "${plist_path}"
