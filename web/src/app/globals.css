@@ -42,6 +42,22 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .recorder-working { display:inline-flex; align-items:center; gap:.45rem; font-size:.75rem; color:#bae6fd; }
 .recorder-privacy { max-width:15rem; font-size:.62rem; line-height:1rem; color:#64748b; }
 @keyframes recording-pulse { 50% { transform:scale(1.04); box-shadow:0 0 0 8px rgba(244,63,94,.08); } }
+.youtube-import { border:1px solid rgba(239,68,68,.14); border-radius:1rem; background:linear-gradient(145deg,rgba(127,29,29,.07),rgba(124,58,237,.04)); color:#cbd5e1; }
+.youtube-import summary { display:flex; min-height:3rem; align-items:center; gap:.55rem; padding:.75rem .9rem; font-size:.78rem; font-weight:700; color:#fecaca; cursor:pointer; list-style:none; }
+.youtube-import summary::-webkit-details-marker { display:none; }
+.youtube-import summary::after { content:"+"; margin-left:.2rem; font-size:1rem; color:#fca5a5; }
+.youtube-import[open] summary::after { content:"−"; }
+.youtube-import summary > span { margin-left:auto; border:1px solid rgba(196,181,253,.16); border-radius:999px; background:rgba(124,58,237,.08); padding:.25rem .45rem; font-size:.56rem; letter-spacing:.08em; text-transform:uppercase; color:#c4b5fd; }
+.youtube-import-body { display:grid; gap:.75rem; border-top:1px solid rgba(248,113,113,.1); padding:.9rem; }
+.youtube-import-body > div { display:grid; gap:.4rem; }
+.youtube-import-body > div > label { font-size:.65rem; font-weight:750; letter-spacing:.08em; text-transform:uppercase; color:#94a3b8; }
+.youtube-import-body input[type="url"] { min-height:2.85rem; width:100%; border:1px solid rgba(255,255,255,.11); border-radius:.75rem; outline:none; background:rgba(2,6,23,.58); padding:.68rem .75rem; font-size:1rem; color:#f8fafc; }
+.youtube-import-body input[type="url"]:focus { border-color:rgba(248,113,113,.55); box-shadow:0 0 0 3px rgba(239,68,68,.1); }
+.youtube-import-note { font-size:.67rem; line-height:1.08rem; color:#64748b; }
+.youtube-import-error { font-size:.68rem; line-height:1.08rem; color:#fda4af; }
+.youtube-import-status { border:1px solid rgba(196,181,253,.13); border-radius:.7rem; background:rgba(124,58,237,.065); padding:.65rem .7rem; font-size:.7rem; line-height:1.08rem; color:#ddd6fe; }
+.youtube-rights-check { display:flex; min-height:2.9rem; align-items:flex-start; gap:.65rem; border:1px solid rgba(255,255,255,.07); border-radius:.75rem; background:rgba(255,255,255,.025); padding:.68rem .72rem; font-size:.7rem; line-height:1.08rem; color:#cbd5e1; cursor:pointer; }
+.youtube-rights-check input { margin-top:.08rem; height:1.15rem; min-width:1.15rem; accent-color:#7c3aed; }
 .phone-help { border:1px solid rgba(125,211,252,.12); border-radius:1rem; background:rgba(14,165,233,.045); color:#cbd5e1; }
 .phone-help summary { display:flex; min-height:2.9rem; align-items:center; gap:.55rem; padding:.75rem .9rem; font-size:.78rem; font-weight:650; color:#bae6fd; cursor:pointer; list-style:none; }
 .phone-help summary::-webkit-details-marker { display:none; }
@@ -175,6 +191,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
   .separation-mode-grid { grid-template-columns:1fr; }
   .separation-mode-card { min-height:0; }
   .upload-zone,.recorder-zone { min-height:10.5rem; border-radius:1rem; padding:1rem; }
+  .youtube-import-body { padding:.85rem; }
   .button-primary,.button-ghost { min-height:2.75rem; }
   .export-actions { width:100%; }
   .export-button { padding-right:.55rem; padding-left:.55rem; font-size:.72rem; }

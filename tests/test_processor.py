@@ -1,5 +1,8 @@
 import io
+import hashlib
+import hmac
 import json
+from concurrent.futures import ThreadPoolExecutor
 import time
 from pathlib import Path
 
@@ -8,6 +11,7 @@ from pydub import AudioSegment
 from pydub.generators import Sine
 
 from processor import api
+from stem_studio.youtube import ImportedYouTubeAudio
 
 
 def test_processor_job_flow(monkeypatch, tmp_path: Path):
@@ -193,3 +197,137 @@ def test_trim_merge_rejects_empty_parts():
     )
 
     assert response.status_code == 422
+
+
+def test_youtube_import_job_becomes_downloadable_mp3(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(api, "WORK_ROOT", tmp_path)
+    api.youtube_imports.clear()
+
+    def fake_import(url: str, directory: Path):
+        assert url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        directory.mkdir(parents=True, exist_ok=True)
+        output = directory / "source.mp3"
+        Sine(440).to_audio_segment(duration=100).export(output, format="mp3")
+        return ImportedYouTubeAudio(output, "My Song", "My Song-youtube.mp3", 0.1)
+
+    monkeypatch.setattr(api, "import_youtube_audio", fake_import)
+    client = TestClient(api.app)
+    response = client.post(
+        "/imports/youtube",
+        data={"url": "https://youtu.be/dQw4w9WgXcQ", "rights_confirmed": "true"},
+    )
+    assert response.status_code == 202
+    job_id = response.json()["id"]
+    for _ in range(50):
+        job = client.get(f"/imports/youtube/{job_id}").json()
+        if job["status"] == "completed":
+            break
+        time.sleep(0.02)
+
+    assert job["status"] == "completed"
+    assert job["file_name"] == "My Song-youtube.mp3"
+    imported = client.get(job["file_url"])
+    assert imported.status_code == 200
+    assert imported.headers["content-type"] == "audio/mpeg"
+    assert "My%20Song-youtube.mp3" in imported.headers["content-disposition"]
+
+
+def test_youtube_import_requires_rights_confirmation_and_safe_url(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(api, "WORK_ROOT", tmp_path)
+    api.youtube_imports.clear()
+    client = TestClient(api.app)
+
+    no_rights = client.post(
+        "/imports/youtube",
+        data={"url": "https://youtu.be/dQw4w9WgXcQ", "rights_confirmed": "false"},
+    )
+    unsafe = client.post(
+        "/imports/youtube",
+        data={"url": "https://youtube.com.evil.example/watch?v=dQw4w9WgXcQ", "rights_confirmed": "true"},
+    )
+
+    assert no_rights.status_code == 422
+    assert unsafe.status_code == 422
+    assert not api.youtube_imports
+
+
+def test_youtube_import_creation_requires_valid_signed_token(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(api, "WORK_ROOT", tmp_path)
+    monkeypatch.setenv("PROCESSOR_SHARED_SECRET", "test-shared-secret")
+    api.youtube_imports.clear()
+    client = TestClient(api.app)
+    data = {"url": "https://youtu.be/dQw4w9WgXcQ", "rights_confirmed": "true"}
+
+    assert client.post("/imports/youtube", data=data).status_code == 401
+
+    timestamp = str(int(time.time()))
+    signature = hmac.new(
+        b"test-shared-secret",
+        f"{timestamp}:upload".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    monkeypatch.setattr(
+        api,
+        "import_youtube_audio",
+        lambda url, directory: (_ for _ in ()).throw(api.YouTubeImportError("test worker stop")),
+    )
+    response = client.post(
+        "/imports/youtube",
+        data=data,
+        headers={"X-Stem-Timestamp": timestamp, "X-Stem-Signature": signature},
+    )
+    assert response.status_code == 202
+
+
+def test_stalled_youtube_import_is_failed_and_no_longer_blocks_queue(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(api, "WORK_ROOT", tmp_path)
+    api.youtube_imports.clear()
+    now = time.time()
+    api.youtube_imports["stalled"] = api.YouTubeImportJob(
+        id="stalled",
+        status="processing",
+        progress=15,
+        created_at=now - api.YOUTUBE_IMPORT_TIMEOUT_SECONDS - 1,
+        expires_at=now + 60,
+    )
+
+    response = TestClient(api.app).get("/imports/youtube/stalled")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
+    assert "processing window" in response.json()["error"]
+
+
+def test_youtube_import_reservation_allows_only_one_active_job(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(api, "WORK_ROOT", tmp_path)
+    monkeypatch.setattr(api.youtube_executor, "submit", lambda *args, **kwargs: None)
+    api.youtube_imports.clear()
+    data = {"url": "https://youtu.be/dQw4w9WgXcQ", "rights_confirmed": "true"}
+
+    def create_import() -> int:
+        return TestClient(api.app).post("/imports/youtube", data=data).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        statuses = list(executor.map(lambda _: create_import(), range(2)))
+
+    assert sorted(statuses) == [202, 429]
+    assert len(api.youtube_imports) == 1
+
+
+def test_youtube_import_releases_reservation_when_worker_cannot_start(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(api, "WORK_ROOT", tmp_path)
+    monkeypatch.setattr(
+        api.youtube_executor,
+        "submit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("executor unavailable")),
+    )
+    api.youtube_imports.clear()
+
+    response = TestClient(api.app).post(
+        "/imports/youtube",
+        data={"url": "https://youtu.be/dQw4w9WgXcQ", "rights_confirmed": "true"},
+    )
+
+    assert response.status_code == 503
+    assert not api.youtube_imports
+    assert not list((tmp_path / "youtube-imports").glob("*"))

@@ -1,16 +1,29 @@
 FROM python:3.11-slim
 
+ARG TARGETARCH
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PORT=8000
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg unzip \
+    && EFFECTIVE_ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && case "$EFFECTIVE_ARCH" in \
+         amd64) DENO_ARCH=x86_64; DENO_SHA=8b010a3b1a4a0188a67cdb8a7a27348b2a501af78aec7fc74f2ace167368d530 ;; \
+         arm64) DENO_ARCH=aarch64; DENO_SHA=6b7cae3a8fc4385a59dea3146fcb8bad7fea4230e0ad36a8c692afacbc254be0 ;; \
+         *) echo "Unsupported architecture: $EFFECTIVE_ARCH"; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://github.com/denoland/deno/releases/download/v2.9.5/deno-${DENO_ARCH}-unknown-linux-gnu.zip" -o /tmp/deno.zip \
+    && echo "${DENO_SHA}  /tmp/deno.zip" | sha256sum -c - \
+    && unzip -q /tmp/deno.zip -d /usr/local/bin \
+    && rm /tmp/deno.zip \
+    && deno --version \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt requirements-processor.txt ./
-RUN pip install --no-cache-dir -r requirements-processor.txt
+RUN pip install --no-cache-dir --timeout 120 --retries 5 -r requirements-processor.txt
 
 COPY stem_studio ./stem_studio
 COPY processor ./processor

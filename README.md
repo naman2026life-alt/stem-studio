@@ -1,6 +1,6 @@
 # Stem Studio
 
-Stem Studio accepts audio or video, can extract a video's audio as MP3, keeps and joins multiple time ranges, and includes a dedicated **Karaoke mode** that removes detected vocals and returns one backing track. It can also split the active audio into **instrumental/no-vocals**, **drums-only**, and **vocals-only** tracks. The local app includes a mixer for placing a separately recorded vocal over the instrumental with offset, trim, and gain controls.
+Stem Studio accepts audio or video, can privately import permitted audio from a single YouTube video, can extract a video's audio as MP3, keeps and joins multiple time ranges, and includes a dedicated **Karaoke mode** that removes detected vocals and returns one backing track. It can also split the active audio into **instrumental/no-vocals**, **drums-only**, and **vocals-only** tracks. The local app includes a mixer for placing a separately recorded vocal over the instrumental with offset, trim, and gain controls.
 
 ## Where it lives
 
@@ -22,6 +22,7 @@ Vercel (Next.js interface)
                     │ direct media upload
                     ▼
 Modal (temporary FFmpeg tools + Demucs on a T4 GPU)
+  ├── permitted YouTube link → queued 192 kbps MP3 import (CPU)
   ├── video → MP3 (optional; CPU)
   ├── ordered trim + merge → MP3 (optional; CPU)
   ├── Karaoke mode → karaoke.wav (drums + bass + other)
@@ -29,7 +30,7 @@ Modal (temporary FFmpeg tools + Demucs on a T4 GPU)
   └── compact 192 kbps MP3 copies prepared for mobile sharing
                     │
                     └── preview/save/share; temporary tool files are deleted
-                        immediately and stem jobs after one hour
+                        immediately and queued jobs after one hour
 ```
 
 Vercel serves the interface but does not run Demucs. A full song can exceed the duration, memory, and package constraints of a free web function. Modal scales the processor to zero between jobs and provides $30/month of compute credit on its free Starter plan at the time this architecture was chosen.
@@ -54,6 +55,7 @@ Open <http://127.0.0.1:7860>. The first separation downloads the Demucs model in
 Terminal 1:
 
 ```bash
+brew install deno ffmpeg
 source .venv/bin/activate
 pip install -r requirements-processor.txt
 uvicorn processor.api:app --host 127.0.0.1 --port 8000
@@ -84,7 +86,7 @@ modal secret create stem-studio-upload-secret PROCESSOR_SHARED_SECRET=PASTE_GENE
 modal deploy modal_app.py
 ```
 
-The deploy command prints the public processor URL. The first real isolation job downloads the `htdemucs` model into the persistent `stem-studio-models` volume. Stem jobs are stored in a separate temporary volume and cleaned up after one hour. Video conversion and trim/merge use FFmpeg in temporary container storage and delete their files as soon as the response finishes.
+The deploy command prints the public processor URL. The image includes pinned yt-dlp, its EJS support package, and a checksum-verified Deno runtime for current YouTube extraction. The first real isolation job downloads the `htdemucs` model into the persistent `stem-studio-models` volume. Stem and YouTube import jobs use the temporary data volume and are cleaned up after one hour. Video conversion and trim/merge use FFmpeg in temporary container storage and delete their files as soon as the response finishes.
 
 ## Deploy the interface to Vercel
 
@@ -117,6 +119,8 @@ Use one container worker. The portable API keeps temporary job state in its loca
 ## Hosted workflow and supported media
 
 - Audio inputs: MP3, WAV, M4A, FLAC, AAC, OGG, and browser-recorded WEBM.
+- Private YouTube import: expand **Import audio from a YouTube link**, paste one `youtube.com` or `youtu.be` video link, confirm that you own it or have permission/authorization to download it, and enter the same private studio password used for processing. A queued CPU job creates a 192 kbps MP3 and makes it the active audio automatically. The browser remembers the active import ID and reconnects after an iPhone reload or app relaunch while the one-hour job still exists.
+- YouTube safety limits: public single-video links only; no playlists, live/upcoming streams, account cookies, or videos over 20 minutes. The downloaded source is capped at 50 MB and the finished MP3 at 40 MB. Public availability by itself is not permission to download a video; follow YouTube's terms and the rightsholder's permissions.
 - Video inputs: MP4, MOV, M4V, MKV, WEBM, and AVI. Extracting the first audio track to a 320 kbps MP3 is optional.
 - Built-in recorder: capture a new take from the device microphone, pause/resume, stop, preview, save, share, trim, or isolate it without first exporting from another app. iPhone recordings use Safari's AAC/MP4 support; other browsers can use WEBM/Opus.
 - Existing iPhone recordings: Safari and Chrome use the native Files picker. Voice Memos normally shares recordings as M4A, which is accepted directly after the user exports it through the iOS Share sheet.
@@ -156,6 +160,7 @@ Tests use generated tones; no copyrighted music or model weights are committed.
 - iOS does not let a website read another app's private recordings, and WebKit does not currently support receiving shared files through the Web Share Target API. Use the built-in recorder for a no-export workflow, or the source app's Share/Export action for an existing recording.
 - A website cannot silently choose a WhatsApp recipient. **Share to WhatsApp** opens the operating system share sheet with the file attached; the user must select WhatsApp and the destination chat. Browsers without file-sharing support save the file so it can be attached manually.
 - Hosted jobs are intentionally temporary. Refresh recovery works within the same browser session, but there is no long-term history.
+- YouTube changes its delivery and bot protection frequently. Private, members-only, age-restricted, region-blocked, or some otherwise public videos may fail from Modal's datacenter IP. Stem Studio never imports browser cookies or Google credentials; if the hosted downloader is blocked, download audio you are authorized to use on your own computer and upload the resulting file. A continuously running authenticated home-computer worker—not cron—can be added later if this becomes a frequent issue.
 - Vocal recording/mixing is currently in the local Gradio app; the hosted release focuses on karaoke/no-vocals, drums-only, and vocals-only outputs.
 
 ## License

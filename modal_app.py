@@ -18,10 +18,16 @@ MODEL_ROOT = Path("/models")
 MAX_UPLOAD_BYTES = 150 * 1024 * 1024
 JOB_TTL_SECONDS = 3600
 UPLOAD_TOKEN_TTL_SECONDS = 300
+YOUTUBE_IMPORT_TIMEOUT_SECONDS = 900
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("ffmpeg")
+    .apt_install("ca-certificates", "curl", "ffmpeg", "unzip")
+    .run_commands(
+        "curl -fsSL https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-unknown-linux-gnu.zip -o /tmp/deno.zip",
+        "echo '8b010a3b1a4a0188a67cdb8a7a27348b2a501af78aec7fc74f2ace167368d530  /tmp/deno.zip' | sha256sum -c -",
+        "unzip -q /tmp/deno.zip -d /usr/local/bin && rm /tmp/deno.zip && deno --version",
+    )
     .pip_install_from_requirements("requirements-processor.txt")
     .env({"TORCH_HOME": str(MODEL_ROOT)})
     .add_local_python_source("stem_studio")
@@ -40,8 +46,29 @@ def _status_path(job_id: str) -> Path:
     return _job_dir(job_id) / "status.json"
 
 
+def _youtube_import_dir(job_id: str) -> Path:
+    return DATA_ROOT / "youtube-imports" / job_id
+
+
+def _youtube_import_status_path(job_id: str) -> Path:
+    return _youtube_import_dir(job_id) / "status.json"
+
+
 def _write_status(job_id: str, **values: object) -> dict[str, object]:
     path = _status_path(job_id)
+    current: dict[str, object] = {}
+    if path.exists():
+        current = json.loads(path.read_text())
+    current.update(values)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(current))
+    temporary.replace(path)
+    return current
+
+
+def _write_youtube_import_status(job_id: str, **values: object) -> dict[str, object]:
+    path = _youtube_import_status_path(job_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
     current: dict[str, object] = {}
     if path.exists():
         current = json.loads(path.read_text())
@@ -62,6 +89,20 @@ def _public_status(job: dict[str, object]) -> dict[str, object]:
     # Jobs created before Karaoke mode did not include this field.
     public.setdefault("mode", "stems")
     return public | {"expires_in_seconds": max(0, round(expires_at - time.time()))}
+
+
+def _public_youtube_import_status(job: dict[str, object]) -> dict[str, object]:
+    expires_at = float(job["expires_at"])
+    public = {key: value for key, value in job.items() if key not in {"expires_at", "call_id", "created_unix"}}
+    return public | {"expires_in_seconds": max(0, round(expires_at - time.time()))}
+
+
+def _youtube_import_timed_out(job: dict[str, object], now: float | None = None) -> bool:
+    try:
+        created_unix = float(job["created_unix"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (now or time.time()) - created_unix >= YOUTUBE_IMPORT_TIMEOUT_SECONDS
 
 
 def _verify_upload_token(timestamp: str | None, signature: str | None) -> None:
@@ -154,6 +195,68 @@ def separate(job_id: str, mode: str = "stems") -> None:
     image=image,
     timeout=900,
     max_containers=1,
+    scaledown_window=15,
+    volumes={str(DATA_ROOT): data_volume},
+)
+def import_youtube(job_id: str, canonical_url: str) -> None:
+    from stem_studio.youtube import YouTubeImportError, import_youtube_audio
+
+    directory = _youtube_import_dir(job_id)
+    # A warm worker keeps its own volume snapshot. Reload the queued record
+    # committed by the web container before updating it.
+    data_volume.reload()
+    status_path = _youtube_import_status_path(job_id)
+    if not status_path.exists():
+        return
+    status = json.loads(status_path.read_text())
+    if status.get("status") != "queued" or _youtube_import_timed_out(status):
+        return
+    try:
+        _write_youtube_import_status(job_id, status="processing", progress=15)
+        data_volume.commit()
+        imported = import_youtube_audio(canonical_url, directory)
+        # Publish the file, then reload status in case the web function marked
+        # this worker as timed out while it was running.
+        data_volume.commit()
+        data_volume.reload()
+        if not status_path.exists():
+            return
+        status = json.loads(status_path.read_text())
+        if status.get("status") not in {"queued", "processing"} or _youtube_import_timed_out(status):
+            imported.path.unlink(missing_ok=True)
+            data_volume.commit()
+            return
+        _write_youtube_import_status(
+            job_id,
+            status="completed",
+            progress=100,
+            title=imported.title,
+            file_name=imported.download_name,
+            file_url=f"/imports/youtube/{job_id}/file",
+            duration_seconds=round(imported.duration_seconds, 3),
+        )
+        data_volume.commit()
+    except YouTubeImportError as exc:
+        for path in directory.glob("source.*"):
+            path.unlink(missing_ok=True)
+        _write_youtube_import_status(job_id, status="failed", error=str(exc), progress=100)
+        data_volume.commit()
+    except Exception:
+        for path in directory.glob("source.*"):
+            path.unlink(missing_ok=True)
+        _write_youtube_import_status(
+            job_id,
+            status="failed",
+            error="YouTube audio import failed. Please try again.",
+            progress=100,
+        )
+        data_volume.commit()
+
+
+@app.function(
+    image=image,
+    timeout=900,
+    max_containers=1,
     scaledown_window=300,
     secrets=[upload_secret],
     volumes={str(DATA_ROOT): data_volume},
@@ -198,6 +301,7 @@ def web():
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["Content-Type", "X-Stem-Timestamp", "X-Stem-Signature"],
     )
+    youtube_import_creation_lock = asyncio.Lock()
 
     @web_app.get("/health")
     async def health():
@@ -300,6 +404,112 @@ def web():
             background=BackgroundTask(shutil.rmtree, directory, ignore_errors=True),
         )
 
+    @web_app.post("/imports/youtube", status_code=202)
+    async def create_youtube_import(
+        url: str = Form(...),
+        rights_confirmed: bool = Form(False),
+        x_stem_timestamp: str | None = Header(default=None),
+        x_stem_signature: str | None = Header(default=None),
+    ):
+        from stem_studio.youtube import YouTubeUrlError, canonicalize_youtube_url
+
+        _verify_upload_token(x_stem_timestamp, x_stem_signature)
+        if not rights_confirmed:
+            raise HTTPException(status_code=422, detail="Confirm that you own this audio or have permission to download it.")
+        try:
+            canonical_url = canonicalize_youtube_url(url)
+        except YouTubeUrlError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        async with youtube_import_creation_lock:
+            await data_volume.reload.aio()
+            imports_root = DATA_ROOT / "youtube-imports"
+            active_imports = 0
+            for status_path in imports_root.glob("*/status.json") if imports_root.exists() else []:
+                try:
+                    existing_status = json.loads(status_path.read_text())
+                    if (
+                        float(existing_status["expires_at"]) > time.time()
+                        and existing_status.get("status") in {"queued", "processing"}
+                        and not _youtube_import_timed_out(existing_status)
+                    ):
+                        active_imports += 1
+                except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+            if active_imports >= 1:
+                raise HTTPException(
+                    status_code=429,
+                    detail="A YouTube import is already running. Please try again when it finishes.",
+                )
+
+            job_id = uuid.uuid4().hex
+            now = time.time()
+            status = _write_youtube_import_status(
+                job_id,
+                id=job_id,
+                status="queued",
+                progress=5,
+                created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                created_unix=now,
+                expires_at=now + JOB_TTL_SECONDS,
+                error=None,
+                title=None,
+                file_name=None,
+                file_url=None,
+                duration_seconds=None,
+            )
+            await data_volume.commit.aio()
+            try:
+                await import_youtube.spawn.aio(job_id, canonical_url)
+            except Exception as exc:
+                status = _write_youtube_import_status(
+                    job_id,
+                    status="failed",
+                    progress=100,
+                    error="The YouTube importer could not start. Please try again shortly.",
+                )
+                await data_volume.commit.aio()
+                raise HTTPException(
+                    status_code=503,
+                    detail="The YouTube importer could not start. Please try again shortly.",
+                ) from exc
+        return _public_youtube_import_status(status)
+
+    @web_app.get("/imports/youtube/{job_id}")
+    async def get_youtube_import(job_id: str):
+        await data_volume.reload.aio()
+        path = _youtube_import_status_path(job_id)
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="This YouTube import expired or could not be found.")
+        status = json.loads(path.read_text())
+        if float(status["expires_at"]) <= time.time():
+            raise HTTPException(status_code=404, detail="This YouTube import expired or could not be found.")
+        if status.get("status") in {"queued", "processing"} and _youtube_import_timed_out(status):
+            status = _write_youtube_import_status(
+                job_id,
+                status="failed",
+                progress=100,
+                error="This YouTube import exceeded its processing window. Please try again.",
+            )
+            await data_volume.commit.aio()
+        return _public_youtube_import_status(status)
+
+    @web_app.get("/imports/youtube/{job_id}/file")
+    async def download_youtube_import(job_id: str):
+        await data_volume.reload.aio()
+        status_path = _youtube_import_status_path(job_id)
+        output = _youtube_import_dir(job_id) / "source.mp3"
+        if not status_path.exists() or not output.is_file():
+            raise HTTPException(status_code=404, detail="This imported audio expired or could not be found.")
+        status = json.loads(status_path.read_text())
+        if (
+            float(status["expires_at"]) <= time.time()
+            or status.get("status") != "completed"
+            or not status.get("file_name")
+        ):
+            raise HTTPException(status_code=404, detail="This imported audio is not available.")
+        return FileResponse(output, media_type="audio/mpeg", filename=str(status["file_name"]))
+
     @web_app.get("/jobs/{job_id}")
     async def get_job(job_id: str):
         await data_volume.reload.aio()
@@ -352,6 +562,15 @@ def cleanup_expired() -> int:
             status = json.loads((job_dir / "status.json").read_text())
             if float(status["expires_at"]) <= time.time():
                 shutil.rmtree(job_dir)
+                removed += 1
+        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
+            continue
+    imports_root = DATA_ROOT / "youtube-imports"
+    for import_dir in imports_root.glob("*") if imports_root.exists() else []:
+        try:
+            status = json.loads((import_dir / "status.json").read_text())
+            if float(status["expires_at"]) <= time.time():
+                shutil.rmtree(import_dir)
                 removed += 1
         except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
             continue

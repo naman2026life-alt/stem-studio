@@ -28,10 +28,13 @@ from stem_studio.audio import (
     transcode_audio_to_mp3,
     trim_and_merge_audio,
 )
+from stem_studio.youtube import YouTubeImportError, YouTubeUrlError, canonicalize_youtube_url, import_youtube_audio
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "150")) * 1024 * 1024
 JOB_TTL_SECONDS = int(os.environ.get("JOB_TTL_SECONDS", "3600"))
 MAX_PENDING_JOBS = int(os.environ.get("MAX_PENDING_JOBS", "3"))
+MAX_PENDING_IMPORTS = int(os.environ.get("MAX_PENDING_IMPORTS", "1"))
+YOUTUBE_IMPORT_TIMEOUT_SECONDS = int(os.environ.get("YOUTUBE_IMPORT_TIMEOUT_SECONDS", "900"))
 UPLOAD_TOKEN_TTL_SECONDS = 300
 CHUNK_BYTES = 1024 * 1024
 WORK_ROOT = Path(os.environ.get("STEM_STUDIO_WORK_ROOT", tempfile.gettempdir())) / "stem-studio-api"
@@ -53,9 +56,25 @@ class Job:
     mode: Literal["stems", "karaoke"] = "stems"
 
 
+@dataclass
+class YouTubeImportJob:
+    id: str
+    status: str
+    progress: int
+    created_at: float
+    expires_at: float
+    error: str | None = None
+    title: str | None = None
+    file_name: str | None = None
+    file_url: str | None = None
+    duration_seconds: float | None = None
+
+
 jobs: dict[str, Job] = {}
+youtube_imports: dict[str, YouTubeImportJob] = {}
 jobs_lock = threading.Lock()
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stem-studio")
+youtube_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stem-studio-youtube")
 
 
 def _allowed_origins() -> list[str]:
@@ -81,8 +100,20 @@ def _public_job(job: Job) -> dict[str, object]:
     return result
 
 
+def _public_youtube_import(job: YouTubeImportJob) -> dict[str, object]:
+    result = asdict(job)
+    result.pop("expires_at")
+    result["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(job.created_at))
+    result["expires_in_seconds"] = max(0, round(job.expires_at - time.time()))
+    return result
+
+
 def _job_dir(job_id: str) -> Path:
     return WORK_ROOT / job_id
+
+
+def _youtube_import_dir(job_id: str) -> Path:
+    return WORK_ROOT / "youtube-imports" / job_id
 
 
 def _cleanup_expired() -> None:
@@ -91,8 +122,18 @@ def _cleanup_expired() -> None:
         expired = [job_id for job_id, job in jobs.items() if job.expires_at <= now]
         for job_id in expired:
             jobs.pop(job_id, None)
+        for job in youtube_imports.values():
+            if job.status in {"queued", "processing"} and now - job.created_at >= YOUTUBE_IMPORT_TIMEOUT_SECONDS:
+                job.status = "failed"
+                job.progress = 100
+                job.error = "This YouTube import exceeded its processing window. Please try again."
+        expired_imports = [job_id for job_id, job in youtube_imports.items() if job.expires_at <= now]
+        for job_id in expired_imports:
+            youtube_imports.pop(job_id, None)
     for job_id in expired:
         shutil.rmtree(_job_dir(job_id), ignore_errors=True)
+    for job_id in expired_imports:
+        shutil.rmtree(_youtube_import_dir(job_id), ignore_errors=True)
 
 
 def _verify_upload_token(timestamp: str | None, signature: str | None) -> None:
@@ -172,6 +213,14 @@ def _set_job(job_id: str, **values: object) -> None:
                 setattr(job, key, value)
 
 
+def _set_youtube_import(job_id: str, **values: object) -> None:
+    with jobs_lock:
+        job = youtube_imports.get(job_id)
+        if job:
+            for key, value in values.items():
+                setattr(job, key, value)
+
+
 def _process_job(job_id: str, source: Path, mode: Literal["stems", "karaoke"] = "stems") -> None:
     try:
         _set_job(job_id, status="processing", progress=8)
@@ -202,12 +251,37 @@ def _process_job(job_id: str, source: Path, mode: Literal["stems", "karaoke"] = 
         _set_job(job_id, status="failed", error=str(exc)[:1000])
 
 
+def _process_youtube_import(job_id: str, canonical_url: str) -> None:
+    directory = _youtube_import_dir(job_id)
+    try:
+        _set_youtube_import(job_id, status="processing", progress=15)
+        imported = import_youtube_audio(canonical_url, directory)
+        with jobs_lock:
+            job = youtube_imports.get(job_id)
+            if not job or job.status not in {"queued", "processing"}:
+                shutil.rmtree(directory, ignore_errors=True)
+                return
+            job.status = "completed"
+            job.progress = 100
+            job.title = imported.title
+            job.file_name = imported.download_name
+            job.file_url = f"/imports/youtube/{job_id}/file"
+            job.duration_seconds = round(imported.duration_seconds, 3)
+    except YouTubeImportError as exc:
+        shutil.rmtree(directory, ignore_errors=True)
+        _set_youtube_import(job_id, status="failed", error=str(exc), progress=100)
+    except Exception:
+        shutil.rmtree(directory, ignore_errors=True)
+        _set_youtube_import(job_id, status="failed", error="YouTube audio import failed. Please try again.", progress=100)
+
+
 @app.get("/health")
 def health() -> dict[str, object]:
     _cleanup_expired()
     with jobs_lock:
         active = sum(job.status in {"queued", "processing"} for job in jobs.values())
-    return {"status": "ok", "active_jobs": active, "model": "htdemucs"}
+        active_imports = sum(job.status in {"queued", "processing"} for job in youtube_imports.values())
+    return {"status": "ok", "active_jobs": active, "active_youtube_imports": active_imports, "model": "htdemucs"}
 
 
 @app.post("/jobs", status_code=202)
@@ -300,6 +374,77 @@ async def trim_merge(
         filename=output.name,
         background=BackgroundTask(shutil.rmtree, directory, ignore_errors=True),
     )
+
+
+@app.post("/imports/youtube", status_code=202)
+async def create_youtube_import(
+    url: str = Form(...),
+    rights_confirmed: bool = Form(False),
+    x_stem_timestamp: str | None = Header(default=None),
+    x_stem_signature: str | None = Header(default=None),
+) -> dict[str, object]:
+    _cleanup_expired()
+    _verify_upload_token(x_stem_timestamp, x_stem_signature)
+    if not rights_confirmed:
+        raise HTTPException(status_code=422, detail="Confirm that you own this audio or have permission to download it.")
+    try:
+        canonical_url = canonicalize_youtube_url(url)
+    except YouTubeUrlError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    job_id = uuid.uuid4().hex
+    directory = _youtube_import_dir(job_id)
+    now = time.time()
+    job = YouTubeImportJob(
+        id=job_id,
+        status="queued",
+        progress=5,
+        created_at=now,
+        expires_at=now + JOB_TTL_SECONDS,
+    )
+    with jobs_lock:
+        pending = sum(job.status in {"queued", "processing"} for job in youtube_imports.values())
+        if pending >= MAX_PENDING_IMPORTS:
+            raise HTTPException(
+                status_code=429,
+                detail="A YouTube import is already running. Please try again when it finishes.",
+            )
+        directory.mkdir(parents=True, exist_ok=True)
+        youtube_imports[job_id] = job
+    try:
+        youtube_executor.submit(_process_youtube_import, job_id, canonical_url)
+    except RuntimeError as exc:
+        with jobs_lock:
+            youtube_imports.pop(job_id, None)
+        shutil.rmtree(directory, ignore_errors=True)
+        raise HTTPException(
+            status_code=503,
+            detail="The YouTube importer could not start. Please try again shortly.",
+        ) from exc
+    return _public_youtube_import(job)
+
+
+@app.get("/imports/youtube/{job_id}")
+def get_youtube_import(job_id: str) -> dict[str, object]:
+    _cleanup_expired()
+    with jobs_lock:
+        job = youtube_imports.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="This YouTube import expired or could not be found.")
+        return _public_youtube_import(job)
+
+
+@app.get("/imports/youtube/{job_id}/file")
+def download_youtube_import(job_id: str) -> FileResponse:
+    _cleanup_expired()
+    with jobs_lock:
+        job = youtube_imports.get(job_id)
+        if not job or job.status != "completed" or not job.file_name:
+            raise HTTPException(status_code=404, detail="This imported audio is not available.")
+        file_name = job.file_name
+    path = _youtube_import_dir(job_id) / "source.mp3"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="This imported audio expired or could not be found.")
+    return FileResponse(path, media_type="audio/mpeg", filename=file_name)
 
 
 @app.get("/jobs/{job_id}")

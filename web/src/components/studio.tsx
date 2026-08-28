@@ -9,6 +9,7 @@ import {
   Film,
   FolderOpen,
   LoaderCircle,
+  Link2,
   LockKeyhole,
   Mic,
   MicOff,
@@ -27,7 +28,7 @@ import {
 
 import { DurationPicker } from "@/components/duration-picker";
 import { ExportActions } from "@/components/export-actions";
-import type { SeparationJob, SeparationMode } from "@/lib/types";
+import type { SeparationJob, SeparationMode, YouTubeImportJob } from "@/lib/types";
 
 const AUDIO_EXTENSIONS = /\.(mp3|wav|m4a|flac|aac|ogg|webm)$/i;
 const VIDEO_EXTENSIONS = /\.(mp4|mov|m4v|mkv|webm|avi)$/i;
@@ -38,9 +39,11 @@ const FILE_PICKER_ACCEPT = [
 ].join(",");
 const MAX_BYTES = 150 * 1024 * 1024;
 const SESSION_KEY = "stem-studio-job-ids";
+const YOUTUBE_IMPORT_SESSION_KEY = "stem-studio-youtube-import-id";
+const YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 
 type MediaKind = "audio" | "video";
-type BusyAction = "convert" | "trim" | SeparationMode | null;
+type BusyAction = "convert" | "trim" | "youtube" | SeparationMode | null;
 type ProtectedAction = Exclude<BusyAction, null>;
 type RecordingState = "idle" | "requesting" | "recording" | "paused" | "processing";
 type TrimPart = { id: number; start: string; end: string };
@@ -90,6 +93,26 @@ function mediaKind(file: File): MediaKind | null {
   if (VIDEO_EXTENSIONS.test(file.name)) return "video";
   if (AUDIO_EXTENSIONS.test(file.name)) return "audio";
   return null;
+}
+
+function isSupportedYouTubeVideoUrl(value: string) {
+  try {
+    const parsed = new URL(value.trim());
+    const host = parsed.hostname.toLowerCase();
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password) return false;
+    if (!["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"].includes(host)) return false;
+    const pathParts = parsed.pathname.split("/").filter(Boolean);
+    if (host === "youtu.be") return pathParts.length === 1 && YOUTUBE_VIDEO_ID.test(pathParts[0]);
+    if (parsed.pathname.replace(/\/$/, "") === "/watch") {
+      const values = parsed.searchParams.getAll("v");
+      return values.length === 1 && YOUTUBE_VIDEO_ID.test(values[0]);
+    }
+    return pathParts.length === 2
+      && ["shorts", "embed"].includes(pathParts[0])
+      && YOUTUBE_VIDEO_ID.test(pathParts[1]);
+  } catch {
+    return false;
+  }
 }
 
 function recordingMimeType() {
@@ -173,7 +196,8 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   const [sourceKind, setSourceKind] = useState<MediaKind | null>(null);
   const [baseAudio, setBaseAudio] = useState<File | null>(null);
   const [workingAudio, setWorkingAudio] = useState<File | null>(null);
-  const [workingState, setWorkingState] = useState<"original" | "converted" | "edited">("original");
+  const [workingState, setWorkingState] = useState<"original" | "converted" | "imported" | "edited">("original");
+  const [baseWorkingState, setBaseWorkingState] = useState<"original" | "converted" | "imported">("original");
   const [audioDuration, setAudioDuration] = useState(0);
   const [parts, setParts] = useState<TrimPart[]>([{ id: 1, start: "00:00", end: "00:09" }]);
   const [accessPassword, setAccessPassword] = useState("");
@@ -184,6 +208,8 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [recordingState, setRecordingState] = useState<RecordingState>("idle");
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [youtubeRightsConfirmed, setYoutubeRightsConfirmed] = useState(false);
   const [message, setMessage] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const unlockDialogRef = useRef<HTMLFormElement>(null);
@@ -310,6 +336,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     setBaseAudio(file);
     setWorkingAudio(file);
     setWorkingState("original");
+    setBaseWorkingState("original");
     setAudioDuration(0);
     resetParts();
   }
@@ -436,6 +463,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     setSourceFile(selected);
     setSourceKind(kind);
     setWorkingState("original");
+    setBaseWorkingState("original");
     if (kind === "audio") {
       setBaseAudio(selected);
       setWorkingAudio(selected);
@@ -479,6 +507,139 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     return await response.blob();
   }
 
+  const pollYouTubeImport = useCallback(async (jobId: string, signal?: AbortSignal): Promise<YouTubeImportJob> => {
+    let connectionFailures = 0;
+    for (let attempt = 0; attempt < 600; attempt += 1) {
+      if (signal?.aborted) throw new DOMException("Import polling stopped.", "AbortError");
+      let response: Response;
+      try {
+        response = await fetch(`${processorUrl}/imports/youtube/${jobId}`, { cache: "no-store", signal });
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        connectionFailures += 1;
+        if (connectionFailures > 8) {
+          throw new Error("The connection was interrupted. Refresh this page to reconnect to the same YouTube import.");
+        }
+        setMessage("Connection interrupted—reconnecting to the same YouTube import…");
+        await new Promise((resolve) => window.setTimeout(resolve, Math.min(2000 * connectionFailures, 10000)));
+        continue;
+      }
+      if (!response.ok) {
+        if ([500, 502, 503, 504].includes(response.status) && connectionFailures < 8) {
+          connectionFailures += 1;
+          setMessage("The processor is waking back up—reconnecting to this import…");
+          await new Promise((resolve) => window.setTimeout(resolve, Math.min(2000 * connectionFailures, 10000)));
+          continue;
+        }
+        if (response.status === 404) localStorage.removeItem(YOUTUBE_IMPORT_SESSION_KEY);
+        throw new Error(await parseResponseError(response));
+      }
+      connectionFailures = 0;
+      const job = await response.json() as YouTubeImportJob;
+      if (job.status === "completed") return job;
+      if (job.status === "failed") {
+        localStorage.removeItem(YOUTUBE_IMPORT_SESSION_KEY);
+        throw new Error(job.error || "YouTube audio import failed. Please retry.");
+      }
+      setMessage(job.status === "queued"
+        ? "YouTube import queued on the private processor…"
+        : "Downloading the YouTube audio and preparing an MP3… You can reopen this page to reconnect.");
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+    }
+    throw new Error("This YouTube import exceeded its processing window. Please try again.");
+  }, [processorUrl]);
+
+  const activateYouTubeImport = useCallback(async (completed: YouTubeImportJob, signal?: AbortSignal) => {
+    if (!completed.file_url) throw new Error("The imported MP3 is not available.");
+    let fileResponse: Response;
+    try {
+      fileResponse = await fetch(outputUrl(processorUrl, completed.file_url), { cache: "no-store", signal });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new Error("The MP3 is ready, but the download was interrupted. Refresh this page to reconnect to the same import.");
+    }
+    if (!fileResponse.ok) {
+      if (fileResponse.status === 404) localStorage.removeItem(YOUTUBE_IMPORT_SESSION_KEY);
+      throw new Error(await parseResponseError(fileResponse));
+    }
+    const blob = await fileResponse.blob();
+    const imported = new File([blob], completed.file_name || "youtube-audio.mp3", { type: "audio/mpeg" });
+    setSourceFile(imported);
+    setSourceKind("audio");
+    setBaseAudio(imported);
+    setWorkingAudio(imported);
+    setWorkingState("imported");
+    setBaseWorkingState("imported");
+    setAudioDuration(0);
+    setParts([{ id: nextPartId++, start: "00:00", end: "00:09" }]);
+    localStorage.removeItem(YOUTUBE_IMPORT_SESSION_KEY);
+    setYoutubeUrl("");
+    setYoutubeRightsConfirmed(false);
+    setMessage("YouTube audio imported. The MP3 is now ready to preview, save, trim, or isolate.");
+  }, [processorUrl]);
+
+  async function importFromYouTube(password?: string) {
+    if (!processorUrl) return;
+    setBusyAction("youtube");
+    try {
+      const existingJobId = localStorage.getItem(YOUTUBE_IMPORT_SESSION_KEY);
+      if (existingJobId) {
+        setMessage("Reconnecting to your current YouTube import…");
+        const existing = await pollYouTubeImport(existingJobId);
+        await activateYouTubeImport(existing);
+        return;
+      }
+      if (!youtubeUrl.trim() || !youtubeRightsConfirmed || !isSupportedYouTubeVideoUrl(youtubeUrl)) return;
+      setMessage("Starting a private YouTube audio import…");
+      const token = await requestToken(password);
+      const form = new FormData();
+      form.append("url", youtubeUrl.trim());
+      form.append("rights_confirmed", "true");
+      const response = await fetch(`${processorUrl}/imports/youtube`, {
+        method: "POST",
+        headers: tokenHeaders(token),
+        body: form,
+      });
+      if (!response.ok) throw new Error(await parseResponseError(response));
+      const queued = await response.json() as YouTubeImportJob;
+      localStorage.setItem(YOUTUBE_IMPORT_SESSION_KEY, queued.id);
+      const completed = await pollYouTubeImport(queued.id);
+      await activateYouTubeImport(completed);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "YouTube audio import failed. Please retry.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  useEffect(() => {
+    const storedJobId = localStorage.getItem(YOUTUBE_IMPORT_SESSION_KEY);
+    if (!processorUrl || !storedJobId) return;
+    const controller = new AbortController();
+    const resume = async () => {
+      try {
+        const completed = await pollYouTubeImport(storedJobId, controller.signal);
+        await activateYouTubeImport(completed, controller.signal);
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setMessage(error instanceof Error ? error.message : "Could not reconnect to the YouTube import.");
+        }
+      } finally {
+        if (!controller.signal.aborted) setBusyAction(null);
+      }
+    };
+    const timer = window.setTimeout(() => {
+      if (controller.signal.aborted) return;
+      setBusyAction("youtube");
+      setMessage("Reconnecting to your YouTube import…");
+      void resume();
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [activateYouTubeImport, pollYouTubeImport, processorUrl]);
+
   async function convertVideo(password?: string) {
     if (!sourceFile || sourceKind !== "video" || !processorUrl) return;
     setBusyAction("convert");
@@ -492,6 +653,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       setBaseAudio(converted);
       setWorkingAudio(converted);
       setWorkingState("converted");
+      setBaseWorkingState("converted");
       setAudioDuration(0);
       resetParts();
       setMessage("Video converted. The MP3 is ready to edit, save, share, or isolate.");
@@ -576,7 +738,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   function restoreBaseAudio() {
     if (!baseAudio) return;
     setWorkingAudio(baseAudio);
-    setWorkingState(sourceKind === "video" ? "converted" : "original");
+    setWorkingState(baseWorkingState);
     setAudioDuration(0);
     resetParts();
     setMessage("Restored the full audio file.");
@@ -619,6 +781,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   }
 
   function executeAction(action: ProtectedAction, password?: string) {
+    if (action === "youtube") void importFromYouTube(password);
     if (action === "convert") void convertVideo(password);
     if (action === "trim") void trimAndMerge(password);
     if (action === "stems") void queueSeparation("stems", password);
@@ -648,6 +811,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
 
   const configured = Boolean(processorUrl);
   const busy = busyAction !== null || recordingState !== "idle";
+  const youtubeUrlValid = isSupportedYouTubeVideoUrl(youtubeUrl);
   const usableAudioDuration = Number.isFinite(audioDuration) && audioDuration > 0 ? audioDuration : 0;
   const pickerPart = pickerTarget ? parts.find((part) => part.id === pickerTarget.partId) : null;
   const pickerRawValue = pickerPart && pickerTarget ? pickerPart[pickerTarget.field] : "";
@@ -665,7 +829,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <p className="eyebrow">Media workspace</p>
-            <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">Record or upload, edit, then isolate</h2>
+            <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">Record, upload, or import—then edit and isolate</h2>
           </div>
           <span className="limit-pill">150 MB max</span>
         </div>
@@ -722,6 +886,56 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
           onClick={(event) => { event.currentTarget.value = ""; }}
         />
 
+        <details aria-busy={busyAction === "youtube"} className="youtube-import mt-4">
+          <summary><Link2 size={18} />Import audio from a YouTube link <span>Private</span></summary>
+          <form
+            className="youtube-import-body"
+            onSubmit={(event) => {
+              event.preventDefault();
+              runProtectedAction("youtube");
+            }}
+          >
+            <div>
+              <label htmlFor="youtube-url">YouTube video link</label>
+              <input
+                autoCapitalize="none"
+                autoComplete="url"
+                autoCorrect="off"
+                disabled={busy}
+                id="youtube-url"
+                inputMode="url"
+                onChange={(event) => setYoutubeUrl(event.target.value)}
+                placeholder="https://www.youtube.com/watch?v=…"
+                spellCheck={false}
+                type="url"
+                value={youtubeUrl}
+              />
+            </div>
+            {youtubeUrl.trim() && !youtubeUrlValid && <p className="youtube-import-error">Paste a link to one YouTube video—not a playlist, channel, or another website.</p>}
+            <p className="youtube-import-note">One public video, up to 20 minutes. It becomes an MP3 and then works like any uploaded audio. If your phone reloads the page, Stem Studio reconnects automatically.</p>
+            <label className="youtube-rights-check">
+              <input
+                checked={youtubeRightsConfirmed}
+                disabled={busy}
+                onChange={(event) => setYoutubeRightsConfirmed(event.target.checked)}
+                type="checkbox"
+              />
+              <span>I own this audio or have permission or authorization to download and process it.</span>
+            </label>
+            <button
+              className="button-primary w-full justify-center"
+              disabled={busy || !configured || !youtubeUrlValid || !youtubeRightsConfirmed}
+              type="submit"
+            >
+              {busyAction === "youtube" ? <LoaderCircle className="animate-spin" size={18} /> : <Link2 size={18} />}
+              {busyAction === "youtube" ? "Importing audio…" : "Import & use audio"}
+            </button>
+            {busyAction === "youtube" && <p className="youtube-import-status">{message || "Preparing the audio… Keep this tab open."}</p>}
+            <p className="youtube-import-note">Some restricted videos or hosted YouTube requests may be blocked. No Google account or cookies are used.</p>
+            {accessProtected && !accessVerified && <p className="processing-hint"><LockKeyhole size={13} />Private processing—password requested after you tap.</p>}
+          </form>
+        </details>
+
         <details className="phone-help mt-4">
           <summary><FolderOpen size={17} />Already recorded in another app?</summary>
           <div className="phone-help-body">
@@ -772,7 +986,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
               <span className="step-number">{sourceKind === "video" ? "2" : "1"}</span>
               <div className="min-w-0 flex-1">
                 <h3 id="audio-heading" className="truncate">{workingAudio.name}</h3>
-                <p>{workingState === "edited" ? "Trimmed and merged MP3" : workingState === "converted" ? "MP3 extracted from video" : "Original audio"} · {formatDuration(audioDuration)}</p>
+                <p>{workingState === "edited" ? "Trimmed and merged MP3" : workingState === "converted" ? "MP3 extracted from video" : workingState === "imported" ? "MP3 imported from YouTube" : "Original audio"} · {formatDuration(audioDuration)}</p>
               </div>
             </div>
             <audio
@@ -856,7 +1070,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
             <div className="active-source-chip mt-4">
               <FileAudio size={16} />
               <span>
-                <small>{workingState === "edited" ? "Using trimmed & merged audio" : workingState === "converted" ? "Using audio from video" : "Using full audio"}</small>
+                <small>{workingState === "edited" ? "Using trimmed & merged audio" : workingState === "converted" ? "Using audio from video" : workingState === "imported" ? "Using imported YouTube audio" : "Using full audio"}</small>
                 <strong>{workingAudio.name}</strong>
               </span>
             </div>
@@ -1007,7 +1221,9 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
                   ? "convert this video"
                   : pendingAction === "karaoke"
                     ? "remove the vocals and make a karaoke track"
-                    : "create all three isolated tracks"}. It protects your Modal credits from public use.
+                    : pendingAction === "youtube"
+                      ? "privately import this YouTube audio"
+                      : "create all three isolated tracks"}. It protects your Modal credits from public use.
             </p>
             <label>
               Studio password
