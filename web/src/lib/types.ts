@@ -16,7 +16,7 @@ export type SeparationJob = {
 
 export type YouTubeImportJob = {
   id: string;
-  status: "queued" | "processing" | "completed" | "failed";
+  status: "queued" | "processing" | "waiting_for_helper" | "processing_home" | "completed" | "failed";
   progress: number;
   created_at: string;
   expires_in_seconds: number;
@@ -25,4 +25,5 @@ export type YouTubeImportJob = {
   file_name: string | null;
   file_url: string | null;
   duration_seconds: number | null;
+  helper_online?: boolean;
 };

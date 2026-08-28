@@ -28,7 +28,13 @@ from stem_studio.audio import (
     transcode_audio_to_mp3,
     trim_and_merge_audio,
 )
-from stem_studio.youtube import YouTubeImportError, YouTubeUrlError, canonicalize_youtube_url, import_youtube_audio
+from stem_studio.youtube import (
+    YouTubeHostedBlockError,
+    YouTubeImportError,
+    YouTubeUrlError,
+    canonicalize_youtube_url,
+    import_youtube_audio,
+)
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "150")) * 1024 * 1024
 JOB_TTL_SECONDS = int(os.environ.get("JOB_TTL_SECONDS", "3600"))
@@ -267,6 +273,14 @@ def _process_youtube_import(job_id: str, canonical_url: str) -> None:
             job.file_name = imported.download_name
             job.file_url = f"/imports/youtube/{job_id}/file"
             job.duration_seconds = round(imported.duration_seconds, 3)
+    except YouTubeHostedBlockError:
+        shutil.rmtree(directory, ignore_errors=True)
+        _set_youtube_import(
+            job_id,
+            status="failed",
+            error="YouTube blocked this processor's network. Run the import from a permitted home connection or upload the audio file.",
+            progress=100,
+        )
     except YouTubeImportError as exc:
         shutil.rmtree(directory, ignore_errors=True)
         _set_youtube_import(job_id, status="failed", error=str(exc), progress=100)
@@ -430,6 +444,24 @@ def get_youtube_import(job_id: str) -> dict[str, object]:
         job = youtube_imports.get(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="This YouTube import expired or could not be found.")
+        return _public_youtube_import(job)
+
+
+@app.post("/imports/youtube/{job_id}/cancel")
+def cancel_youtube_import(
+    job_id: str,
+    x_stem_timestamp: str | None = Header(default=None),
+    x_stem_signature: str | None = Header(default=None),
+) -> dict[str, object]:
+    _verify_upload_token(x_stem_timestamp, x_stem_signature)
+    with jobs_lock:
+        job = youtube_imports.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="This YouTube import expired or could not be found.")
+        if job.status in {"queued", "processing"}:
+            job.status = "failed"
+            job.progress = 100
+            job.error = "YouTube import cancelled."
         return _public_youtube_import(job)
 
 

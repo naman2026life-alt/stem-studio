@@ -7,6 +7,7 @@ from pydub.generators import Sine
 from yt_dlp.utils import DownloadError
 
 from stem_studio.youtube import (
+    YouTubeHostedBlockError,
     YouTubeImportError,
     YouTubeUrlError,
     canonicalize_youtube_url,
@@ -129,6 +130,111 @@ def test_import_redacts_raw_ytdlp_error_and_logs_nothing(monkeypatch, tmp_path: 
     captured = capsys.readouterr()
     assert "internal-secret" not in captured.out
     assert "internal-secret" not in captured.err
+
+
+def test_import_retries_cloud_block_with_embedded_player_client(monkeypatch, tmp_path: Path):
+    attempts: list[dict[str, object]] = []
+
+    class RetryYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+            attempts.append(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url: str, download: bool):
+            if len(attempts) == 1:
+                (tmp_path / "source.partial").write_bytes(b"stale first attempt")
+                raise DownloadError("HTTP Error 403: sign in to confirm you're not a bot")
+
+            assert not (tmp_path / "source.partial").exists()
+            audio = io.BytesIO()
+            Sine(440).to_audio_segment(duration=100).export(audio, format="mp3", bitrate="192k")
+            (tmp_path / "source.mp3").write_bytes(audio.getvalue())
+            return {"id": "dQw4w9WgXcQ", "title": "Recovered", "duration": 0.1}
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", RetryYoutubeDL)
+
+    result = import_youtube_audio("https://youtu.be/dQw4w9WgXcQ", tmp_path)
+
+    assert result.title == "Recovered"
+    assert len(attempts) == 2
+    assert "extractor_args" not in attempts[0]
+    assert attempts[1]["extractor_args"] == {"youtube": {"player_client": ["web_embedded"]}}
+    assert all(attempt["source_address"] == "0.0.0.0" for attempt in attempts)
+
+
+@pytest.mark.parametrize(
+    "raw_error",
+    [
+        "HTTP Error 403: Forbidden",
+        "HTTP Error 429: Too Many Requests",
+        "Sign in to confirm you're not a bot",
+    ],
+)
+def test_import_classifies_repeated_cloud_rejection_for_home_helper(
+    monkeypatch,
+    tmp_path: Path,
+    raw_error: str,
+):
+    attempts = 0
+
+    class BlockedYoutubeDL:
+        def __init__(self, options):
+            nonlocal attempts
+            attempts += 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url: str, download: bool):
+            raise DownloadError(raw_error)
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", BlockedYoutubeDL)
+
+    with pytest.raises(YouTubeHostedBlockError) as error:
+        import_youtube_audio("https://youtu.be/dQw4w9WgXcQ", tmp_path)
+
+    assert attempts == 2
+    assert error.value.code == "host_blocked"
+    assert raw_error not in str(error.value)
+
+
+def test_import_preserves_cloud_block_classification_if_embedded_retry_is_generic(
+    monkeypatch,
+    tmp_path: Path,
+):
+    attempts = 0
+
+    class BlockedThenGenericYoutubeDL:
+        def __init__(self, options):
+            nonlocal attempts
+            attempts += 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url: str, download: bool):
+            if attempts == 1:
+                raise DownloadError("HTTP Error 403: Forbidden")
+            raise DownloadError("This content is not available on this app")
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", BlockedThenGenericYoutubeDL)
+
+    with pytest.raises(YouTubeHostedBlockError):
+        import_youtube_audio("https://youtu.be/dQw4w9WgXcQ", tmp_path)
+
+    assert attempts == 2
 
 
 def test_import_requires_exact_expected_output(monkeypatch, tmp_path: Path):

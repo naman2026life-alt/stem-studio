@@ -26,9 +26,24 @@ MAX_YOUTUBE_URL_CHARS = 2048
 class YouTubeImportError(RuntimeError):
     """A safe, user-facing YouTube import error."""
 
+    code = "temporary"
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        if code is not None:
+            self.code = code
+
 
 class YouTubeUrlError(YouTubeImportError):
     """The submitted URL is not a supported single-video YouTube URL."""
+
+    code = "invalid_url"
+
+
+class YouTubeHostedBlockError(YouTubeImportError):
+    """YouTube rejected the cloud host, so a residential helper may retry."""
+
+    code = "host_blocked"
 
 
 class _QuietYtDlpLogger:
@@ -90,7 +105,7 @@ def canonicalize_youtube_url(raw_url: str) -> str:
     return f"https://www.youtube.com/watch?v={video_id}"
 
 
-def _safe_download_name(title: object) -> tuple[str, str]:
+def safe_youtube_download_name(title: object) -> tuple[str, str]:
     value = unicodedata.normalize("NFKC", str(title or "YouTube audio"))
     value = "".join(" " if unicodedata.category(character).startswith("C") else character for character in value)
     value = re.sub(r"[\\/:*?\"<>|]+", " ", value)
@@ -99,16 +114,29 @@ def _safe_download_name(title: object) -> tuple[str, str]:
     return safe_title, f"{safe_title}-youtube.mp3"
 
 
-def _safe_upstream_message(raw_message: str) -> str:
+def _safe_upstream_error(raw_message: str) -> YouTubeImportError:
     message = raw_message.lower()
-    if any(term in message for term in ("sign in to confirm", "not a bot", "http error 403", "http error 429")):
-        return (
-            "YouTube blocked the hosted downloader for this video. "
-            "Download it on your computer and upload the audio here instead."
+    if any(
+        term in message
+        for term in (
+            "private video",
+            "members-only",
+            "age-restricted",
+            "confirm your age",
+            "not available in your country",
         )
-    if any(term in message for term in ("private video", "members-only", "age-restricted", "not available in your country")):
-        return "This YouTube video is restricted or unavailable. Try a public video you are allowed to download."
-    return "YouTube could not provide this video right now. Check that it is public and try again shortly."
+    ):
+        return YouTubeImportError(
+            "This YouTube video is restricted or unavailable. Try a public video you are allowed to download.",
+            code="restricted",
+        )
+    if any(term in message for term in ("sign in to confirm", "not a bot", "http error 403", "http error 429")):
+        return YouTubeHostedBlockError(
+            "YouTube blocked the hosted downloader. Waiting for your private Mac or PC helper to take over."
+        )
+    return YouTubeImportError(
+        "YouTube could not provide this video right now. Check that it is public and try again shortly."
+    )
 
 
 def import_youtube_audio(
@@ -130,30 +158,32 @@ def import_youtube_audio(
     for stale in directory.glob("source.*"):
         stale.unlink(missing_ok=True)
     output = directory / "source.mp3"
-    validation_error: list[str] = []
+    validation_error: list[tuple[str, str]] = []
     source_too_large = False
 
     def match_filter(info: dict[str, object], *, incomplete: bool = False) -> str | None:
         live_status = str(info.get("live_status") or "")
         if info.get("is_live") or live_status in {"is_live", "is_upcoming"}:
-            validation_error[:] = ["Live and upcoming YouTube streams are not supported."]
-            return validation_error[0]
+            validation_error[:] = [("Live and upcoming YouTube streams are not supported.", "restricted")]
+            return validation_error[0][0]
         duration = info.get("duration")
         if duration is None and incomplete:
             return None
         if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(float(duration)):
-            validation_error[:] = ["Could not read this video's duration. Try a normal public video."]
-            return validation_error[0]
+            validation_error[:] = [("Could not read this video's duration. Try a normal public video.", "invalid_audio")]
+            return validation_error[0][0]
         if float(duration) <= 0:
-            validation_error[:] = ["This YouTube video does not contain usable audio."]
-            return validation_error[0]
+            validation_error[:] = [("This YouTube video does not contain usable audio.", "invalid_audio")]
+            return validation_error[0][0]
         if float(duration) > max_duration_seconds:
-            validation_error[:] = [f"Choose a YouTube video that is {max_duration_seconds // 60} minutes or shorter."]
-            return validation_error[0]
+            validation_error[:] = [
+                (f"Choose a YouTube video that is {max_duration_seconds // 60} minutes or shorter.", "too_long")
+            ]
+            return validation_error[0][0]
         estimated_size = info.get("filesize") or info.get("filesize_approx")
         if isinstance(estimated_size, (int, float)) and estimated_size > max_source_bytes:
-            validation_error[:] = ["This YouTube audio is too large to import safely."]
-            return validation_error[0]
+            validation_error[:] = [("This YouTube audio is too large to import safely.", "too_large")]
+            return validation_error[0][0]
         return None
 
     def progress_hook(status: dict[str, object]) -> None:
@@ -161,7 +191,7 @@ def import_youtube_audio(
         downloaded = status.get("downloaded_bytes")
         if isinstance(downloaded, (int, float)) and downloaded > max_source_bytes:
             source_too_large = True
-            raise YouTubeImportError("This YouTube audio is too large to import safely.")
+            raise YouTubeImportError("This YouTube audio is too large to import safely.", code="too_large")
 
     options = {
         "format": "bestaudio/best",
@@ -180,6 +210,7 @@ def import_youtube_audio(
         "retries": 2,
         "fragment_retries": 2,
         "extractor_retries": 1,
+        "source_address": "0.0.0.0",
         "match_filter": match_filter,
         "progress_hooks": [progress_hook],
         "js_runtimes": {"deno": {}},
@@ -192,33 +223,65 @@ def import_youtube_audio(
         ],
     }
 
-    try:
-        with YoutubeDL(options) as downloader:
-            info = downloader.extract_info(canonical_url, download=True)
-    except YouTubeImportError:
-        raise
-    except DownloadError as exc:
-        if validation_error:
-            raise YouTubeImportError(validation_error[0]) from exc
-        if source_too_large:
-            raise YouTubeImportError("This YouTube audio is too large to import safely.") from exc
-        raise YouTubeImportError(_safe_upstream_message(str(exc))) from exc
-    except Exception as exc:
-        if validation_error:
-            raise YouTubeImportError(validation_error[0]) from exc
-        if source_too_large:
-            raise YouTubeImportError("This YouTube audio is too large to import safely.") from exc
-        raise YouTubeImportError("YouTube audio import failed. Please try again shortly.") from exc
+    info: dict[str, object] | None = None
+    attempts: tuple[dict[str, object] | None, ...] = (
+        None,
+        {"youtube": {"player_client": ["web_embedded"]}},
+    )
+    saw_hosted_block = False
+    for attempt_index, extractor_args in enumerate(attempts):
+        validation_error.clear()
+        source_too_large = False
+        for stale in directory.glob("source.*"):
+            stale.unlink(missing_ok=True)
+        attempt_options = dict(options)
+        if extractor_args is not None:
+            attempt_options["extractor_args"] = extractor_args
+        try:
+            with YoutubeDL(attempt_options) as downloader:
+                extracted = downloader.extract_info(canonical_url, download=True)
+            if isinstance(extracted, dict):
+                info = extracted
+            break
+        except YouTubeImportError:
+            raise
+        except DownloadError as exc:
+            if validation_error:
+                message, code = validation_error[0]
+                raise YouTubeImportError(message, code=code) from exc
+            if source_too_large:
+                raise YouTubeImportError(
+                    "This YouTube audio is too large to import safely.", code="too_large"
+                ) from exc
+            safe_error = _safe_upstream_error(str(exc))
+            if isinstance(safe_error, YouTubeHostedBlockError) and attempt_index + 1 < len(attempts):
+                saw_hosted_block = True
+                continue
+            if saw_hosted_block and safe_error.code == "temporary":
+                raise YouTubeHostedBlockError(
+                    "YouTube blocked the hosted downloader. Waiting for your private Mac or PC helper to take over."
+                ) from exc
+            raise safe_error from exc
+        except Exception as exc:
+            if validation_error:
+                message, code = validation_error[0]
+                raise YouTubeImportError(message, code=code) from exc
+            if source_too_large:
+                raise YouTubeImportError(
+                    "This YouTube audio is too large to import safely.", code="too_large"
+                ) from exc
+            raise YouTubeImportError("YouTube audio import failed. Please try again shortly.") from exc
 
     if validation_error:
-        raise YouTubeImportError(validation_error[0])
+        message, code = validation_error[0]
+        raise YouTubeImportError(message, code=code)
     if not isinstance(info, dict) or str(info.get("id") or "") != expected_video_id:
         raise YouTubeImportError("YouTube did not return the requested single video.")
     if not output.is_file() or output.stat().st_size <= 0:
         raise YouTubeImportError("YouTube did not return a usable audio file.")
     if output.stat().st_size > max_mp3_bytes:
         output.unlink(missing_ok=True)
-        raise YouTubeImportError("The finished YouTube MP3 is too large to use here.")
+        raise YouTubeImportError("The finished YouTube MP3 is too large to use here.", code="too_large")
 
     try:
         duration = probe_duration_seconds(output)
@@ -227,7 +290,10 @@ def import_youtube_audio(
         raise YouTubeImportError("The downloaded YouTube audio could not be verified.") from exc
     if duration > max_duration_seconds + 1:
         output.unlink(missing_ok=True)
-        raise YouTubeImportError(f"Choose a YouTube video that is {max_duration_seconds // 60} minutes or shorter.")
+        raise YouTubeImportError(
+            f"Choose a YouTube video that is {max_duration_seconds // 60} minutes or shorter.",
+            code="too_long",
+        )
 
-    title, download_name = _safe_download_name(info.get("title"))
+    title, download_name = safe_youtube_download_name(info.get("title"))
     return ImportedYouTubeAudio(output, title, download_name, duration)

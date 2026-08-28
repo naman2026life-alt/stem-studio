@@ -3,6 +3,8 @@ import hashlib
 import hmac
 import json
 import os
+import re
+import secrets
 import shutil
 import tempfile
 import time
@@ -19,6 +21,8 @@ MAX_UPLOAD_BYTES = 150 * 1024 * 1024
 JOB_TTL_SECONDS = 3600
 UPLOAD_TOKEN_TTL_SECONDS = 300
 YOUTUBE_IMPORT_TIMEOUT_SECONDS = 900
+HOME_WORKER_LEASE_SECONDS = 300
+HOME_WORKER_MAX_ATTEMPTS = 3
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -32,10 +36,33 @@ image = (
     .env({"TORCH_HOME": str(MODEL_ROOT)})
     .add_local_python_source("stem_studio")
 )
+helper_api_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install("ffmpeg")
+    .pip_install(
+        "fastapi>=0.115,<1",
+        "python-multipart>=0.0.20,<1",
+        "pydub>=0.25,<1",
+    )
+    .add_local_python_source("stem_studio")
+)
 app = modal.App(APP_NAME)
 data_volume = modal.Volume.from_name("stem-studio-jobs", create_if_missing=True)
 model_volume = modal.Volume.from_name("stem-studio-models", create_if_missing=True)
 upload_secret = modal.Secret.from_name("stem-studio-upload-secret")
+home_worker_secret = modal.Secret.from_name("stem-studio-home-worker-secret")
+
+YOUTUBE_PUBLIC_FIELDS = (
+    "id",
+    "status",
+    "progress",
+    "created_at",
+    "error",
+    "title",
+    "file_name",
+    "file_url",
+    "duration_seconds",
+)
 
 
 def _job_dir(job_id: str) -> Path:
@@ -52,6 +79,10 @@ def _youtube_import_dir(job_id: str) -> Path:
 
 def _youtube_import_status_path(job_id: str) -> Path:
     return _youtube_import_dir(job_id) / "status.json"
+
+
+def _youtube_import_cancel_path(job_id: str) -> Path:
+    return _youtube_import_dir(job_id) / "cancelled"
 
 
 def _write_status(job_id: str, **values: object) -> dict[str, object]:
@@ -93,7 +124,16 @@ def _public_status(job: dict[str, object]) -> dict[str, object]:
 
 def _public_youtube_import_status(job: dict[str, object]) -> dict[str, object]:
     expires_at = float(job["expires_at"])
-    public = {key: value for key, value in job.items() if key not in {"expires_at", "call_id", "created_unix"}}
+    # This is deliberately an allowlist: status records also contain the
+    # canonical source URL and a private helper lease when cloud egress is
+    # blocked. Neither may ever be returned to the browser.
+    public = {key: job.get(key) for key in YOUTUBE_PUBLIC_FIELDS}
+    if job.get("id") and _youtube_import_cancel_path(str(job["id"])).exists():
+        public.update(status="failed", progress=100, error="YouTube import cancelled.")
+    last_seen = job.get("helper_last_seen")
+    public["helper_online"] = (
+        isinstance(last_seen, (int, float)) and time.time() - float(last_seen) < HOME_WORKER_LEASE_SECONDS
+    )
     return public | {"expires_in_seconds": max(0, round(expires_at - time.time()))}
 
 
@@ -103,6 +143,100 @@ def _youtube_import_timed_out(job: dict[str, object], now: float | None = None) 
     except (KeyError, TypeError, ValueError):
         return False
     return (now or time.time()) - created_unix >= YOUTUBE_IMPORT_TIMEOUT_SECONDS
+
+
+def _worker_lease_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _worker_lease_is_valid(job: dict[str, object], token: str, now: float | None = None) -> bool:
+    expected = str(job.get("lease_token_hash") or "")
+    try:
+        lease_expires_at = float(job["lease_expires_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bool(expected) and lease_expires_at > (now or time.time()) and hmac.compare_digest(
+        expected,
+        _worker_lease_hash(token),
+    )
+
+
+def _claim_home_worker_job(worker_id: str, now: float | None = None) -> dict[str, object] | None:
+    current_time = now or time.time()
+    imports_root = DATA_ROOT / "youtube-imports"
+    candidates: list[tuple[float, Path, dict[str, object]]] = []
+    for status_path in imports_root.glob("*/status.json") if imports_root.exists() else []:
+        try:
+            status = json.loads(status_path.read_text())
+            if _youtube_import_cancel_path(str(status["id"])).exists():
+                continue
+            if float(status["expires_at"]) <= current_time:
+                continue
+            if status.get("status") == "processing_home":
+                try:
+                    lease_expired = float(status.get("lease_expires_at") or 0) <= current_time
+                except (TypeError, ValueError):
+                    lease_expired = True
+                if lease_expired:
+                    attempts = int(status.get("helper_attempts") or 0) + 1
+                    if attempts >= HOME_WORKER_MAX_ATTEMPTS:
+                        _write_youtube_import_status(
+                            str(status["id"]),
+                            status="failed",
+                            progress=100,
+                            error="The private helper stopped before finishing this import. Please try again.",
+                            helper_attempts=attempts,
+                            canonical_url=None,
+                            lease_token_hash=None,
+                            lease_expires_at=None,
+                            worker_id=None,
+                        )
+                        continue
+                    status = _write_youtube_import_status(
+                        str(status["id"]),
+                        status="waiting_for_helper",
+                        progress=25,
+                        helper_attempts=attempts,
+                        lease_token_hash=None,
+                        lease_expires_at=None,
+                        worker_id=None,
+                    )
+            if status.get("status") != "waiting_for_helper" or not status.get("canonical_url"):
+                continue
+            candidates.append((float(status.get("created_unix") or current_time), status_path, status))
+        except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    if not candidates:
+        return None
+
+    _, _, status = min(candidates, key=lambda item: item[0])
+    token = secrets.token_urlsafe(32)
+    job_id = str(status["id"])
+    claimed = _write_youtube_import_status(
+        job_id,
+        status="processing_home",
+        progress=35,
+        error=None,
+        lease_token_hash=_worker_lease_hash(token),
+        lease_expires_at=current_time + HOME_WORKER_LEASE_SECONDS,
+        helper_last_seen=current_time,
+        worker_id=worker_id[:80],
+    )
+    return {
+        "id": job_id,
+        "url": str(claimed["canonical_url"]),
+        "lease_token": token,
+        "lease_seconds": HOME_WORKER_LEASE_SECONDS,
+    }
+
+
+def _verify_home_worker_secret(authorization: str | None) -> None:
+    from fastapi import HTTPException
+
+    expected = os.environ.get("HOME_WORKER_SECRET")
+    supplied = authorization.removeprefix("Bearer ") if authorization and authorization.startswith("Bearer ") else ""
+    if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+        raise HTTPException(status_code=401, detail="A valid private helper credential is required.")
 
 
 def _verify_upload_token(timestamp: str | None, signature: str | None) -> None:
@@ -199,14 +333,14 @@ def separate(job_id: str, mode: str = "stems") -> None:
     volumes={str(DATA_ROOT): data_volume},
 )
 def import_youtube(job_id: str, canonical_url: str) -> None:
-    from stem_studio.youtube import YouTubeImportError, import_youtube_audio
+    from stem_studio.youtube import YouTubeHostedBlockError, YouTubeImportError, import_youtube_audio
 
     directory = _youtube_import_dir(job_id)
     # A warm worker keeps its own volume snapshot. Reload the queued record
     # committed by the web container before updating it.
     data_volume.reload()
     status_path = _youtube_import_status_path(job_id)
-    if not status_path.exists():
+    if not status_path.exists() or _youtube_import_cancel_path(job_id).exists():
         return
     status = json.loads(status_path.read_text())
     if status.get("status") != "queued" or _youtube_import_timed_out(status):
@@ -219,7 +353,7 @@ def import_youtube(job_id: str, canonical_url: str) -> None:
         # this worker as timed out while it was running.
         data_volume.commit()
         data_volume.reload()
-        if not status_path.exists():
+        if not status_path.exists() or _youtube_import_cancel_path(job_id).exists():
             return
         status = json.loads(status_path.read_text())
         if status.get("status") not in {"queued", "processing"} or _youtube_import_timed_out(status):
@@ -236,14 +370,45 @@ def import_youtube(job_id: str, canonical_url: str) -> None:
             duration_seconds=round(imported.duration_seconds, 3),
         )
         data_volume.commit()
+    except YouTubeHostedBlockError:
+        for path in directory.glob("source.*"):
+            path.unlink(missing_ok=True)
+        data_volume.reload()
+        if not status_path.exists() or _youtube_import_cancel_path(job_id).exists():
+            return
+        latest = json.loads(status_path.read_text())
+        if latest.get("status") not in {"queued", "processing"}:
+            return
+        _write_youtube_import_status(
+            job_id,
+            status="waiting_for_helper",
+            progress=25,
+            error=None,
+            canonical_url=canonical_url,
+            cloud_outcome="host_blocked",
+            helper_attempts=0,
+        )
+        data_volume.commit()
     except YouTubeImportError as exc:
         for path in directory.glob("source.*"):
             path.unlink(missing_ok=True)
+        data_volume.reload()
+        if not status_path.exists() or _youtube_import_cancel_path(job_id).exists():
+            return
+        latest = json.loads(status_path.read_text())
+        if latest.get("status") not in {"queued", "processing"}:
+            return
         _write_youtube_import_status(job_id, status="failed", error=str(exc), progress=100)
         data_volume.commit()
     except Exception:
         for path in directory.glob("source.*"):
             path.unlink(missing_ok=True)
+        data_volume.reload()
+        if not status_path.exists() or _youtube_import_cancel_path(job_id).exists():
+            return
+        latest = json.loads(status_path.read_text())
+        if latest.get("status") not in {"queued", "processing"}:
+            return
         _write_youtube_import_status(
             job_id,
             status="failed",
@@ -257,7 +422,7 @@ def import_youtube(job_id: str, canonical_url: str) -> None:
     image=image,
     timeout=900,
     max_containers=1,
-    scaledown_window=300,
+    scaledown_window=30,
     secrets=[upload_secret],
     volumes={str(DATA_ROOT): data_volume},
 )
@@ -428,10 +593,16 @@ def web():
             for status_path in imports_root.glob("*/status.json") if imports_root.exists() else []:
                 try:
                     existing_status = json.loads(status_path.read_text())
+                    if _youtube_import_cancel_path(str(existing_status["id"])).exists():
+                        continue
                     if (
                         float(existing_status["expires_at"]) > time.time()
-                        and existing_status.get("status") in {"queued", "processing"}
-                        and not _youtube_import_timed_out(existing_status)
+                        and existing_status.get("status")
+                        in {"queued", "processing", "waiting_for_helper", "processing_home"}
+                        and (
+                            existing_status.get("status") not in {"queued", "processing"}
+                            or not _youtube_import_timed_out(existing_status)
+                        )
                     ):
                         active_imports += 1
                 except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -494,12 +665,39 @@ def web():
             await data_volume.commit.aio()
         return _public_youtube_import_status(status)
 
+    @web_app.post("/imports/youtube/{job_id}/cancel")
+    async def cancel_youtube_import(
+        job_id: str,
+        x_stem_timestamp: str | None = Header(default=None),
+        x_stem_signature: str | None = Header(default=None),
+    ):
+        _verify_upload_token(x_stem_timestamp, x_stem_signature)
+        async with youtube_import_creation_lock:
+            await data_volume.reload.aio()
+            status_path = _youtube_import_status_path(job_id)
+            if not status_path.exists():
+                raise HTTPException(status_code=404, detail="This YouTube import expired or could not be found.")
+            status = json.loads(status_path.read_text())
+            if status.get("status") in {"queued", "processing", "waiting_for_helper", "processing_home"}:
+                _youtube_import_cancel_path(job_id).touch(exist_ok=True)
+                status = _write_youtube_import_status(
+                    job_id,
+                    status="failed",
+                    progress=100,
+                    error="YouTube import cancelled.",
+                    canonical_url=None,
+                    lease_token_hash=None,
+                    lease_expires_at=None,
+                )
+                await data_volume.commit.aio()
+        return _public_youtube_import_status(status)
+
     @web_app.get("/imports/youtube/{job_id}/file")
     async def download_youtube_import(job_id: str):
         await data_volume.reload.aio()
         status_path = _youtube_import_status_path(job_id)
         output = _youtube_import_dir(job_id) / "source.mp3"
-        if not status_path.exists() or not output.is_file():
+        if not status_path.exists() or _youtube_import_cancel_path(job_id).exists() or not output.is_file():
             raise HTTPException(status_code=404, detail="This imported audio expired or could not be found.")
         status = json.loads(status_path.read_text())
         if (
@@ -550,6 +748,205 @@ def web():
         return FileResponse(path, media_type="audio/mpeg", filename=f"{safe_name}-{output_name}.mp3")
 
     return web_app
+
+
+@app.function(
+    image=helper_api_image,
+    timeout=900,
+    max_containers=1,
+    scaledown_window=2,
+    secrets=[home_worker_secret],
+    volumes={str(DATA_ROOT): data_volume},
+)
+@modal.concurrent(max_inputs=4)
+@modal.asgi_app()
+def home_worker_api():
+    """Small, low-idle-cost broker used only by the private home helper."""
+    from fastapi import FastAPI, File, Form, Header, HTTPException, Response, UploadFile
+
+    from stem_studio.audio import probe_duration_seconds
+    from stem_studio.youtube import (
+        MAX_YOUTUBE_DURATION_SECONDS,
+        MAX_YOUTUBE_MP3_BYTES,
+        safe_youtube_download_name,
+    )
+
+    helper_app = FastAPI(title="Stem Studio Private Helper Broker", version="1.0.0")
+    mutation_lock = asyncio.Lock()
+
+    async def require_job_and_lease(job_id: str, lease_token: str | None) -> dict[str, object]:
+        if not lease_token:
+            raise HTTPException(status_code=401, detail="The helper lease is missing.")
+        status_path = _youtube_import_status_path(job_id)
+        if not status_path.exists() or _youtube_import_cancel_path(job_id).exists():
+            raise HTTPException(status_code=404, detail="This helper job expired or could not be found.")
+        status = json.loads(status_path.read_text())
+        if status.get("status") != "processing_home" or not _worker_lease_is_valid(status, lease_token):
+            raise HTTPException(status_code=409, detail="This helper lease expired or was replaced.")
+        return status
+
+    @helper_app.get("/health")
+    async def helper_health():
+        return {"status": "ok", "service": "stem-studio-home-helper"}
+
+    @helper_app.post("/worker/youtube/claim")
+    async def claim_youtube_job(
+        worker_id: str = Form("private-helper"),
+        authorization: str | None = Header(default=None),
+    ):
+        _verify_home_worker_secret(authorization)
+        async with mutation_lock:
+            await data_volume.reload.aio()
+            claim = _claim_home_worker_job(worker_id)
+            if claim is None:
+                return Response(status_code=204)
+            await data_volume.commit.aio()
+        return claim
+
+    @helper_app.post("/worker/youtube/{job_id}/heartbeat")
+    async def heartbeat_youtube_job(
+        job_id: str,
+        authorization: str | None = Header(default=None),
+        x_worker_lease: str | None = Header(default=None),
+    ):
+        _verify_home_worker_secret(authorization)
+        async with mutation_lock:
+            await data_volume.reload.aio()
+            await require_job_and_lease(job_id, x_worker_lease)
+            now = time.time()
+            _write_youtube_import_status(
+                job_id,
+                lease_expires_at=now + HOME_WORKER_LEASE_SECONDS,
+                helper_last_seen=now,
+            )
+            await data_volume.commit.aio()
+        return {"status": "ok", "lease_seconds": HOME_WORKER_LEASE_SECONDS}
+
+    @helper_app.post("/worker/youtube/{job_id}/complete")
+    async def complete_youtube_job(
+        job_id: str,
+        file: UploadFile = File(...),
+        title: str = Form("YouTube audio"),
+        sha256: str = Form(...),
+        authorization: str | None = Header(default=None),
+        x_worker_lease: str | None = Header(default=None),
+    ):
+        _verify_home_worker_secret(authorization)
+        if not re.fullmatch(r"[a-f0-9]{64}", sha256):
+            raise HTTPException(status_code=422, detail="The helper file checksum is invalid.")
+
+        temporary_directory = Path(tempfile.mkdtemp(prefix="stem-studio-helper-upload-"))
+        temporary_output = temporary_directory / "source.mp3"
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            try:
+                with temporary_output.open("wb") as destination:
+                    while chunk := await file.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > MAX_YOUTUBE_MP3_BYTES:
+                            raise HTTPException(status_code=413, detail="The helper MP3 is too large.")
+                        digest.update(chunk)
+                        destination.write(chunk)
+            except Exception:
+                shutil.rmtree(temporary_directory, ignore_errors=True)
+                raise
+        finally:
+            await file.close()
+        if size == 0 or not hmac.compare_digest(digest.hexdigest(), sha256):
+            shutil.rmtree(temporary_directory, ignore_errors=True)
+            raise HTTPException(status_code=422, detail="The helper MP3 was incomplete.")
+        try:
+            duration = await asyncio.to_thread(probe_duration_seconds, temporary_output)
+        except (OSError, RuntimeError, ValueError) as exc:
+            shutil.rmtree(temporary_directory, ignore_errors=True)
+            raise HTTPException(status_code=422, detail="The helper did not return a valid MP3.") from exc
+        if duration > MAX_YOUTUBE_DURATION_SECONDS + 1:
+            shutil.rmtree(temporary_directory, ignore_errors=True)
+            raise HTTPException(
+                status_code=422,
+                detail=f"Choose a YouTube video that is {MAX_YOUTUBE_DURATION_SECONDS // 60} minutes or shorter.",
+            )
+
+        safe_title, download_name = safe_youtube_download_name(title)
+        try:
+            async with mutation_lock:
+                await data_volume.reload.aio()
+                await require_job_and_lease(job_id, x_worker_lease)
+                directory = _youtube_import_dir(job_id)
+                directory.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(temporary_output, directory / "source.mp3")
+                completed_at = time.time()
+                status = _write_youtube_import_status(
+                    job_id,
+                    status="completed",
+                    progress=100,
+                    error=None,
+                    title=safe_title,
+                    file_name=download_name,
+                    file_url=f"/imports/youtube/{job_id}/file",
+                    duration_seconds=round(duration, 3),
+                    result_sha256=sha256,
+                    completed_via="home_helper",
+                    canonical_url=None,
+                    lease_token_hash=None,
+                    lease_expires_at=None,
+                    expires_at=completed_at + JOB_TTL_SECONDS,
+                )
+                await data_volume.commit.aio()
+        finally:
+            shutil.rmtree(temporary_directory, ignore_errors=True)
+        return _public_youtube_import_status(status)
+
+    @helper_app.post("/worker/youtube/{job_id}/fail")
+    async def fail_youtube_job(
+        job_id: str,
+        code: str = Form("temporary"),
+        authorization: str | None = Header(default=None),
+        x_worker_lease: str | None = Header(default=None),
+    ):
+        _verify_home_worker_secret(authorization)
+        terminal_errors = {
+            "restricted": "This YouTube video is restricted or unavailable. Try a public video you are allowed to download.",
+            "too_long": f"Choose a YouTube video that is {MAX_YOUTUBE_DURATION_SECONDS // 60} minutes or shorter.",
+            "too_large": "This YouTube audio is too large to import safely.",
+            "invalid_audio": "YouTube did not return usable audio for this video.",
+            "invalid_url": "This is not a supported single-video YouTube link.",
+        }
+        async with mutation_lock:
+            await data_volume.reload.aio()
+            status = await require_job_and_lease(job_id, x_worker_lease)
+            attempts = int(status.get("helper_attempts") or 0) + 1
+            if code in terminal_errors or attempts >= HOME_WORKER_MAX_ATTEMPTS:
+                error = terminal_errors.get(
+                    code,
+                    "YouTube also blocked or interrupted the private helper. Upload the audio file directly instead.",
+                )
+                updated = _write_youtube_import_status(
+                    job_id,
+                    status="failed",
+                    progress=100,
+                    error=error,
+                    helper_attempts=attempts,
+                    canonical_url=None,
+                    lease_token_hash=None,
+                    lease_expires_at=None,
+                )
+            else:
+                updated = _write_youtube_import_status(
+                    job_id,
+                    status="waiting_for_helper",
+                    progress=25,
+                    error=None,
+                    helper_attempts=attempts,
+                    lease_token_hash=None,
+                    lease_expires_at=None,
+                    worker_id=None,
+                )
+            await data_volume.commit.aio()
+        return _public_youtube_import_status(updated)
+
+    return helper_app
 
 
 @app.function(image=image, schedule=modal.Period(minutes=30), volumes={str(DATA_ROOT): data_volume})

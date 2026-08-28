@@ -44,7 +44,7 @@ const YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 
 type MediaKind = "audio" | "video";
 type BusyAction = "convert" | "trim" | "youtube" | SeparationMode | null;
-type ProtectedAction = Exclude<BusyAction, null>;
+type ProtectedAction = Exclude<BusyAction, null> | "youtube_cancel";
 type RecordingState = "idle" | "requesting" | "recording" | "paused" | "processing";
 type TrimPart = { id: number; start: string; end: string };
 type PickerTarget = { field: "start" | "end"; partId: number; partIndex: number };
@@ -210,6 +210,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [youtubeRightsConfirmed, setYoutubeRightsConfirmed] = useState(false);
+  const [youtubeImportId, setYoutubeImportId] = useState("");
   const [message, setMessage] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const unlockDialogRef = useRef<HTMLFormElement>(null);
@@ -219,6 +220,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const microphoneStreamRef = useRef<MediaStream | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
+  const youtubePollAbortRef = useRef<AbortController | null>(null);
   const sourceUrl = useObjectUrl(sourceFile);
   const audioUrl = useObjectUrl(workingAudio);
 
@@ -541,10 +543,17 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
         localStorage.removeItem(YOUTUBE_IMPORT_SESSION_KEY);
         throw new Error(job.error || "YouTube audio import failed. Please retry.");
       }
-      setMessage(job.status === "queued"
-        ? "YouTube import queued on the private processor…"
-        : "Downloading the YouTube audio and preparing an MP3… You can reopen this page to reconnect.");
-      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      if (job.status === "queued") {
+        setMessage("YouTube import queued on the private processor…");
+      } else if (job.status === "waiting_for_helper") {
+        setMessage("YouTube blocked the cloud route. Waiting for your private Mac helper—it will take over automatically while the Mac is awake.");
+      } else if (job.status === "processing_home") {
+        setMessage("Your private Mac helper is downloading the audio and preparing the MP3…");
+      } else {
+        setMessage("Downloading the YouTube audio and preparing an MP3… You can reopen this page to reconnect.");
+      }
+      const pollDelay = job.status === "waiting_for_helper" ? 6000 : 2000;
+      await new Promise((resolve) => window.setTimeout(resolve, pollDelay));
     }
     throw new Error("This YouTube import exceeded its processing window. Please try again.");
   }, [processorUrl]);
@@ -573,6 +582,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     setAudioDuration(0);
     setParts([{ id: nextPartId++, start: "00:00", end: "00:09" }]);
     localStorage.removeItem(YOUTUBE_IMPORT_SESSION_KEY);
+    setYoutubeImportId("");
     setYoutubeUrl("");
     setYoutubeRightsConfirmed(false);
     setMessage("YouTube audio imported. The MP3 is now ready to preview, save, trim, or isolate.");
@@ -580,13 +590,17 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
 
   async function importFromYouTube(password?: string) {
     if (!processorUrl) return;
+    const controller = new AbortController();
+    youtubePollAbortRef.current?.abort();
+    youtubePollAbortRef.current = controller;
     setBusyAction("youtube");
     try {
       const existingJobId = localStorage.getItem(YOUTUBE_IMPORT_SESSION_KEY);
       if (existingJobId) {
+        setYoutubeImportId(existingJobId);
         setMessage("Reconnecting to your current YouTube import…");
-        const existing = await pollYouTubeImport(existingJobId);
-        await activateYouTubeImport(existing);
+        const existing = await pollYouTubeImport(existingJobId, controller.signal);
+        await activateYouTubeImport(existing, controller.signal);
         return;
       }
       if (!youtubeUrl.trim() || !youtubeRightsConfirmed || !isSupportedYouTubeVideoUrl(youtubeUrl)) return;
@@ -599,16 +613,43 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
         method: "POST",
         headers: tokenHeaders(token),
         body: form,
+        signal: controller.signal,
       });
       if (!response.ok) throw new Error(await parseResponseError(response));
       const queued = await response.json() as YouTubeImportJob;
       localStorage.setItem(YOUTUBE_IMPORT_SESSION_KEY, queued.id);
-      const completed = await pollYouTubeImport(queued.id);
-      await activateYouTubeImport(completed);
+      setYoutubeImportId(queued.id);
+      const completed = await pollYouTubeImport(queued.id, controller.signal);
+      await activateYouTubeImport(completed, controller.signal);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "YouTube audio import failed. Please retry.");
+      if (!controller.signal.aborted) {
+        setMessage(error instanceof Error ? error.message : "YouTube audio import failed. Please retry.");
+      }
     } finally {
+      if (youtubePollAbortRef.current === controller) youtubePollAbortRef.current = null;
       setBusyAction(null);
+    }
+  }
+
+  async function cancelYouTubeImport(password?: string) {
+    const jobId = localStorage.getItem(YOUTUBE_IMPORT_SESSION_KEY);
+    if (!jobId || !processorUrl) return;
+    setMessage("Cancelling this YouTube import…");
+    try {
+      const token = await requestToken(password);
+      const response = await fetch(`${processorUrl}/imports/youtube/${jobId}/cancel`, {
+        method: "POST",
+        headers: tokenHeaders(token),
+      });
+      if (!response.ok && response.status !== 404) throw new Error(await parseResponseError(response));
+      youtubePollAbortRef.current?.abort();
+      youtubePollAbortRef.current = null;
+      localStorage.removeItem(YOUTUBE_IMPORT_SESSION_KEY);
+      setYoutubeImportId("");
+      setBusyAction(null);
+      setMessage("YouTube import cancelled. You can start another one.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not cancel this import. Please retry.");
     }
   }
 
@@ -616,6 +657,8 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     const storedJobId = localStorage.getItem(YOUTUBE_IMPORT_SESSION_KEY);
     if (!processorUrl || !storedJobId) return;
     const controller = new AbortController();
+    youtubePollAbortRef.current?.abort();
+    youtubePollAbortRef.current = controller;
     const resume = async () => {
       try {
         const completed = await pollYouTubeImport(storedJobId, controller.signal);
@@ -630,6 +673,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     };
     const timer = window.setTimeout(() => {
       if (controller.signal.aborted) return;
+      setYoutubeImportId(storedJobId);
       setBusyAction("youtube");
       setMessage("Reconnecting to your YouTube import…");
       void resume();
@@ -637,6 +681,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     return () => {
       window.clearTimeout(timer);
       controller.abort();
+      if (youtubePollAbortRef.current === controller) youtubePollAbortRef.current = null;
     };
   }, [activateYouTubeImport, pollYouTubeImport, processorUrl]);
 
@@ -782,6 +827,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
 
   function executeAction(action: ProtectedAction, password?: string) {
     if (action === "youtube") void importFromYouTube(password);
+    if (action === "youtube_cancel") void cancelYouTubeImport(password);
     if (action === "convert") void convertVideo(password);
     if (action === "trim") void trimAndMerge(password);
     if (action === "stems") void queueSeparation("stems", password);
@@ -931,7 +977,12 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
               {busyAction === "youtube" ? "Importing audio…" : "Import & use audio"}
             </button>
             {busyAction === "youtube" && <p className="youtube-import-status">{message || "Preparing the audio… Keep this tab open."}</p>}
-            <p className="youtube-import-note">Some restricted videos or hosted YouTube requests may be blocked. No Google account or cookies are used.</p>
+            {busyAction === "youtube" && youtubeImportId && (
+              <button className="button-ghost w-full justify-center" onClick={() => runProtectedAction("youtube_cancel")} type="button">
+                <XCircle size={17} />Cancel this import
+              </button>
+            )}
+            <p className="youtube-import-note">No Google account or cookies are used. If YouTube blocks the cloud route, your private Mac helper takes over automatically while that Mac is awake.</p>
             {accessProtected && !accessVerified && <p className="processing-hint"><LockKeyhole size={13} />Private processing—password requested after you tap.</p>}
           </form>
         </details>
@@ -1223,6 +1274,8 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
                     ? "remove the vocals and make a karaoke track"
                     : pendingAction === "youtube"
                       ? "privately import this YouTube audio"
+                      : pendingAction === "youtube_cancel"
+                        ? "cancel this YouTube import"
                       : "create all three isolated tracks"}. It protects your Modal credits from public use.
             </p>
             <label>

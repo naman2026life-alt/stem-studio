@@ -23,6 +23,8 @@ Vercel (Next.js interface)
                     ▼
 Modal (temporary FFmpeg tools + Demucs on a T4 GPU)
   ├── permitted YouTube link → queued 192 kbps MP3 import (CPU)
+  │          └── if YouTube blocks the cloud IP, a private Mac/PC helper
+  │              downloads over the home connection and returns the MP3
   ├── video → MP3 (optional; CPU)
   ├── ordered trim + merge → MP3 (optional; CPU)
   ├── Karaoke mode → karaoke.wav (drums + bass + other)
@@ -83,10 +85,53 @@ modal setup
 python -c 'import secrets; print(secrets.token_urlsafe(32))'
 modal secret create stem-studio-upload-secret PROCESSOR_SHARED_SECRET=PASTE_GENERATED_VALUE
 
+# Separate least-privilege credential used only by the outbound home helper.
+python -c 'import secrets; print(secrets.token_urlsafe(48))'
+modal secret create stem-studio-home-worker-secret HOME_WORKER_SECRET=PASTE_SECOND_GENERATED_VALUE
+
 modal deploy modal_app.py
 ```
 
-The deploy command prints the public processor URL. The image includes pinned yt-dlp, its EJS support package, and a checksum-verified Deno runtime for current YouTube extraction. The first real isolation job downloads the `htdemucs` model into the persistent `stem-studio-models` volume. Stem and YouTube import jobs use the temporary data volume and are cleaned up after one hour. Video conversion and trim/merge use FFmpeg in temporary container storage and delete their files as soon as the response finishes.
+The deploy command prints the public processor URL and a separate `home-worker-api` URL. The helper credential never belongs in Vercel, browser JavaScript, GitHub, or any `NEXT_PUBLIC_*` variable. The image includes pinned yt-dlp, its EJS support package, and a checksum-verified Deno runtime for current YouTube extraction. The first real isolation job downloads the `htdemucs` model into the persistent `stem-studio-models` volume. Stem and YouTube import jobs use the temporary data volume and are cleaned up after one hour. Video conversion and trim/merge use FFmpeg in temporary container storage and delete their files as soon as the response finishes.
+
+## Private Mac/Windows YouTube helper
+
+YouTube sometimes rejects downloads from Modal's datacenter IP even when the same public video works normally at home. Stem Studio first tries the hosted route (including an embedded-player retry), then changes the job to **Waiting for your private helper** only for that specific network block. The helper makes outbound HTTPS requests; it does not open a laptop port, change router settings, use browser cookies, or require Supabase.
+
+On the Mac that should take over automatically:
+
+```bash
+brew install ffmpeg deno python@3.11
+source .venv/bin/activate
+pip install -r requirements-worker.txt
+
+# One-time foreground check (the secret can be entered without being shown):
+python -m stem_studio.home_worker \
+  --broker-url https://YOUR-MODAL-HOME-WORKER-API-URL \
+  --once
+
+# Install at login; the secret is saved in macOS Keychain, not the repository.
+scripts/install_macos_helper.sh https://YOUR-MODAL-HOME-WORKER-API-URL
+```
+
+The launch agent checks about once every three minutes (about 90 seconds average pickup time) and runs one import at a time. Its broker is a separate tiny Modal function with a two-second scale-down window, so idle polling does not keep the main processor warm. View its local status with:
+
+```bash
+launchctl print "gui/$(id -u)/com.stemstudio.youtube-helper"
+tail -f "$HOME/Library/Logs/StemStudioHelper.log"
+```
+
+On Windows, install Python 3.11, FFmpeg, and Deno, then run the same module with the secret in the current PowerShell session:
+
+```powershell
+py -3.11 -m venv .venv-worker
+.\.venv-worker\Scripts\Activate.ps1
+pip install -r requirements-worker.txt
+$env:STEM_STUDIO_WORKER_SECRET = "YOUR_PRIVATE_HELPER_SECRET"
+python -m stem_studio.home_worker --broker-url https://YOUR-MODAL-HOME-WORKER-API-URL
+```
+
+For an unattended Windows Task Scheduler job, store the secret in Windows Credential Manager and have a short local wrapper retrieve it; do not put the secret in GitHub or a public task definition. The helper must be awake and online when a cloud-blocked job is waiting. It uses a renewable, one-job lease so a restart or short network interruption cannot let an old attempt overwrite a newer result.
 
 ## Deploy the interface to Vercel
 
@@ -119,7 +164,7 @@ Use one container worker. The portable API keeps temporary job state in its loca
 ## Hosted workflow and supported media
 
 - Audio inputs: MP3, WAV, M4A, FLAC, AAC, OGG, and browser-recorded WEBM.
-- Private YouTube import: expand **Import audio from a YouTube link**, paste one `youtube.com` or `youtu.be` video link, confirm that you own it or have permission/authorization to download it, and enter the same private studio password used for processing. A queued CPU job creates a 192 kbps MP3 and makes it the active audio automatically. The browser remembers the active import ID and reconnects after an iPhone reload or app relaunch while the one-hour job still exists.
+- Private YouTube import: expand **Import audio from a YouTube link**, paste one `youtube.com` or `youtu.be` video link, confirm that you own it or have permission/authorization to download it, and enter the same private studio password used for processing. A queued CPU job creates a 192 kbps MP3 and makes it the active audio automatically. If YouTube blocks Modal, the installed private Mac/PC helper takes over without another action on the phone. The browser remembers the active import ID and reconnects after an iPhone reload or app relaunch while the one-hour job still exists.
 - YouTube safety limits: public single-video links only; no playlists, live/upcoming streams, account cookies, or videos over 20 minutes. The downloaded source is capped at 50 MB and the finished MP3 at 40 MB. Public availability by itself is not permission to download a video; follow YouTube's terms and the rightsholder's permissions.
 - Video inputs: MP4, MOV, M4V, MKV, WEBM, and AVI. Extracting the first audio track to a 320 kbps MP3 is optional.
 - Built-in recorder: capture a new take from the device microphone, pause/resume, stop, preview, save, share, trim, or isolate it without first exporting from another app. iPhone recordings use Safari's AAC/MP4 support; other browsers can use WEBM/Opus.
@@ -160,7 +205,7 @@ Tests use generated tones; no copyrighted music or model weights are committed.
 - iOS does not let a website read another app's private recordings, and WebKit does not currently support receiving shared files through the Web Share Target API. Use the built-in recorder for a no-export workflow, or the source app's Share/Export action for an existing recording.
 - A website cannot silently choose a WhatsApp recipient. **Share to WhatsApp** opens the operating system share sheet with the file attached; the user must select WhatsApp and the destination chat. Browsers without file-sharing support save the file so it can be attached manually.
 - Hosted jobs are intentionally temporary. Refresh recovery works within the same browser session, but there is no long-term history.
-- YouTube changes its delivery and bot protection frequently. Private, members-only, age-restricted, region-blocked, or some otherwise public videos may fail from Modal's datacenter IP. Stem Studio never imports browser cookies or Google credentials; if the hosted downloader is blocked, download audio you are authorized to use on your own computer and upload the resulting file. A continuously running authenticated home-computer worker—not cron—can be added later if this becomes a frequent issue.
+- YouTube changes its delivery and bot protection frequently. Private, members-only, age-restricted, and region-blocked videos remain unsupported. For otherwise usable videos that reject Modal's datacenter IP, the authenticated home helper retries over the Mac/PC's normal connection. Stem Studio never imports browser cookies or Google credentials. If both routes are rejected, upload an audio file you are authorized to use directly.
 - Vocal recording/mixing is currently in the local Gradio app; the hosted release focuses on karaoke/no-vocals, drums-only, and vocals-only outputs.
 
 ## License

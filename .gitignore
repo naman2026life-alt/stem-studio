@@ -12,6 +12,7 @@ mixes/
 models/
 .model-cache/
 .env.processor
+.env.worker
 *.mp3
 *.wav
 *.m4a
