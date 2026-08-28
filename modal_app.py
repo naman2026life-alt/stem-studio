@@ -798,9 +798,12 @@ def home_worker_api():
         async with mutation_lock:
             await data_volume.reload.aio()
             claim = _claim_home_worker_job(worker_id)
+            # Claim reconciliation can also expire a dead lease and mark the
+            # final allowed attempt failed, even when there is nothing to
+            # return to this poll.
+            await data_volume.commit.aio()
             if claim is None:
                 return Response(status_code=204)
-            await data_volume.commit.aio()
         return claim
 
     @helper_app.post("/worker/youtube/{job_id}/heartbeat")

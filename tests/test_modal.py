@@ -147,6 +147,20 @@ def test_home_worker_reclaims_job_after_lease_expires(monkeypatch, tmp_path: Pat
     assert _worker_lease_is_valid(saved, str(claim["lease_token"]), now=now + 1)
 
 
+def test_cancel_sentinel_overrides_stale_status_and_blocks_helper_claim(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(modal_app, "DATA_ROOT", tmp_path)
+    now = 30_000.0
+    _create_helper_job("cancelled", created_unix=100.0, expires_at=now + 600)
+    modal_app._youtube_import_cancel_path("cancelled").touch()
+    stale = json.loads((tmp_path / "youtube-imports" / "cancelled" / "status.json").read_text())
+
+    public = _public_youtube_import_status(stale)
+
+    assert public["status"] == "failed"
+    assert public["error"] == "YouTube import cancelled."
+    assert _claim_home_worker_job("late-worker", now=now) is None
+
+
 class _NoopModalVolumeAction:
     def __call__(self) -> None:
         pass
