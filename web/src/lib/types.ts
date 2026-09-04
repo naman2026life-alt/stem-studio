@@ -27,3 +27,11 @@ export type YouTubeImportJob = {
   duration_seconds: number | null;
   helper_online?: boolean;
 };
+
+export type VocalMixResult = {
+  id: string;
+  created_at: string;
+  expires_in_seconds: number;
+  wav_url: string;
+  mp3_url: string;
+};

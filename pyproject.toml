@@ -1,3 +1,16 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["B", "E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI and Gradio intentionally use dependency/component factories in defaults.
+"app.py" = ["B008"]
+"modal_app.py" = ["B008"]
+"processor/api.py" = ["B008"]

@@ -9,15 +9,19 @@ type ExportActionsProps = {
   fileName?: string;
   mimeType?: string;
   remoteUrl?: string;
+  saveLabel?: string;
+  secondaryFileName?: string;
+  secondaryMimeType?: string;
+  secondaryRemoteUrl?: string;
+  secondarySaveLabel?: string;
   shareFileName?: string;
   shareMimeType?: string;
   shareRemoteUrl?: string;
   showHint?: boolean;
 };
 
-type ExportAction = "save" | "share" | null;
+type ExportAction = "save" | "save-secondary" | "share" | null;
 type ExportNotice = { kind: "error" | "info"; text: string } | null;
-type SharePreparation = "failed" | "idle" | "preparing" | "ready";
 
 class ExportFetchError extends Error {
   constructor(public status: number) {
@@ -93,6 +97,11 @@ export function ExportActions({
   fileName,
   mimeType,
   remoteUrl,
+  saveLabel = "Save to device",
+  secondaryFileName,
+  secondaryMimeType,
+  secondaryRemoteUrl,
+  secondarySaveLabel = "Save MP3",
   shareFileName,
   shareMimeType,
   shareRemoteUrl,
@@ -100,49 +109,12 @@ export function ExportActions({
 }: ExportActionsProps) {
   const [busyAction, setBusyAction] = useState<ExportAction>(null);
   const [notice, setNotice] = useState<ExportNotice>(null);
-  const [sharePreparation, setSharePreparation] = useState<SharePreparation>(shareRemoteUrl ? "preparing" : "idle");
   const preparedShareFile = useRef<File | null>(null);
 
   useEffect(() => {
-    if (!shareRemoteUrl) return;
-    const controller = new AbortController();
-    let active = true;
-
-    const prepareShareFile = async () => {
-      // Let hydration finish before feature detection, then avoid downloading
-      // share copies in browsers that cannot attach files to a share sheet.
-      await Promise.resolve();
-      const shareProbe = new File([new Uint8Array()], "share-probe.mp3", { type: "audio/mpeg" });
-      const supportsFileSharing = typeof navigator.share === "function"
-        && typeof navigator.canShare === "function"
-        && navigator.canShare({ files: [shareProbe] });
-      if (!supportsFileSharing) {
-        if (active) setSharePreparation("idle");
-        return;
-      }
-
-      try {
-        const prepared = await fetchFile(
-          shareRemoteUrl,
-          shareFileName || fileName || "stem-studio-audio.mp3",
-          shareMimeType,
-          controller.signal,
-        );
-        if (!active) return;
-        preparedShareFile.current = prepared;
-        setSharePreparation("ready");
-      } catch (error) {
-        if (!active || errorName(error) === "AbortError") return;
-        setSharePreparation("failed");
-      }
-    };
-
-    void prepareShareFile();
-    return () => {
-      active = false;
-      controller.abort();
-      preparedShareFile.current = null;
-    };
+    // Keep result cards light on mobile. Share files are fetched only after the
+    // user asks for them instead of eagerly downloading every MP3 stem.
+    preparedShareFile.current = null;
   }, [fileName, shareFileName, shareMimeType, shareRemoteUrl]);
 
   const resolveDownloadFile = async () => {
@@ -163,7 +135,6 @@ export function ExportActions({
           shareMimeType,
         );
         preparedShareFile.current = prepared;
-        setSharePreparation("ready");
         return prepared;
       } catch (error) {
         if (!(error instanceof ExportFetchError) || (error.status !== 404 && error.status !== 410)) {
@@ -175,8 +146,16 @@ export function ExportActions({
 
     const fallbackFile = await resolveDownloadFile();
     preparedShareFile.current = fallbackFile;
-    setSharePreparation("ready");
     return fallbackFile;
+  };
+
+  const resolveSecondaryDownloadFile = async () => {
+    if (!secondaryRemoteUrl) throw new Error("No secondary file is available to export.");
+    return await fetchFile(
+      secondaryRemoteUrl,
+      secondaryFileName || "stem-studio-mix.mp3",
+      secondaryMimeType,
+    );
   };
 
   const explainFailure = (error: unknown) => {
@@ -193,6 +172,20 @@ export function ExportActions({
       const exportFile = await resolveDownloadFile();
       downloadFile(exportFile);
       setNotice({ kind: "info", text: "Save started. Find the file in this device’s Downloads or Files app." });
+    } catch (error) {
+      setNotice({ kind: "error", text: explainFailure(error) });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const saveSecondary = async () => {
+    setBusyAction("save-secondary");
+    setNotice(null);
+    try {
+      const exportFile = await resolveSecondaryDownloadFile();
+      downloadFile(exportFile);
+      setNotice({ kind: "info", text: "MP3 save started. Find it in this device’s Downloads or Files app." });
     } catch (error) {
       setNotice({ kind: "error", text: explainFailure(error) });
     } finally {
@@ -243,8 +236,8 @@ export function ExportActions({
   };
 
   const busy = busyAction !== null;
-  const sharePreparing = sharePreparation === "preparing";
   const downloadName = file?.name || fileName || "audio file";
+  const secondaryDownloadName = secondaryFileName || "MP3 audio file";
   const outgoingName = file?.name || shareFileName || fileName || "audio file";
 
   return (
@@ -252,11 +245,17 @@ export function ExportActions({
       <div className="export-actions">
         <button aria-label={`Save ${downloadName} to device`} className="export-button" disabled={busy} onClick={() => void save()} type="button">
           {busyAction === "save" ? <LoaderCircle className="animate-spin" size={16} /> : <Download size={16} />}
-          {busyAction === "save" ? "Preparing…" : "Save to device"}
+          {busyAction === "save" ? "Preparing…" : saveLabel}
         </button>
-        <button aria-label={`Share ${outgoingName} to WhatsApp`} className="export-button is-share" disabled={busy || sharePreparing} onClick={() => void share()} type="button">
-          {busyAction === "share" || sharePreparing ? <LoaderCircle className="animate-spin" size={16} /> : <Share2 size={16} />}
-          {busyAction === "share" ? "Opening…" : sharePreparing ? "Preparing share…" : "Share to WhatsApp"}
+        {secondaryRemoteUrl && (
+          <button aria-label={`Save ${secondaryDownloadName} to device`} className="export-button" disabled={busy} onClick={() => void saveSecondary()} type="button">
+            {busyAction === "save-secondary" ? <LoaderCircle className="animate-spin" size={16} /> : <Download size={16} />}
+            {busyAction === "save-secondary" ? "Preparing…" : secondarySaveLabel}
+          </button>
+        )}
+        <button aria-label={`Share ${outgoingName} to WhatsApp`} className="export-button is-share" disabled={busy} onClick={() => void share()} type="button">
+          {busyAction === "share" ? <LoaderCircle className="animate-spin" size={16} /> : <Share2 size={16} />}
+          {busyAction === "share" ? "Preparing share…" : "Share to WhatsApp"}
         </button>
       </div>
       {showHint && !notice && (

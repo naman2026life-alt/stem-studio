@@ -31,6 +31,10 @@ function compactDuration(totalSeconds: number) {
     : `${minutes}:${padded(seconds)}`;
 }
 
+function scrollBehavior(): ScrollBehavior {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+}
+
 function WheelColumn({
   label,
   maximum,
@@ -98,7 +102,7 @@ function WheelColumn({
             key={option}
             onClick={() => {
               onChange(option);
-              scrollerRef.current?.scrollTo({ top: option * ROW_HEIGHT, behavior: "smooth" });
+              scrollerRef.current?.scrollTo({ top: option * ROW_HEIGHT, behavior: scrollBehavior() });
             }}
           >
             {padded(option)}

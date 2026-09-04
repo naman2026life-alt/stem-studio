@@ -22,7 +22,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt requirements-processor.txt ./
+COPY requirements-processor.txt ./
 RUN pip install --no-cache-dir --timeout 120 --retries 5 -r requirements-processor.txt
 
 COPY stem_studio ./stem_studio

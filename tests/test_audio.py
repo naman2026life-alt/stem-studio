@@ -1,6 +1,7 @@
 import subprocess
 from pathlib import Path
 
+import pytest
 from pydub import AudioSegment
 from pydub.generators import Sine
 
@@ -43,6 +44,18 @@ def test_trim_merge_preserves_order_and_clamps_to_duration(tmp_path: Path):
 
     assert output.exists()
     assert 1180 <= len(AudioSegment.from_file(output)) <= 1220
+
+
+def test_trim_merge_rejects_runaway_combined_duration(monkeypatch, tmp_path: Path):
+    source = tmp_path / "source.wav"
+    output = tmp_path / "edited.mp3"
+    Sine(330).to_audio_segment(duration=1000).export(source, format="wav")
+    monkeypatch.setattr("stem_studio.audio.MAX_MERGED_DURATION_SECONDS", 1.5)
+
+    with pytest.raises(ValueError, match="60 minutes"):
+        trim_and_merge_audio(source, [(0, 1), (0, 1)], output)
+
+    assert not output.exists()
 
 
 def test_transcode_audio_to_share_mp3(tmp_path: Path):

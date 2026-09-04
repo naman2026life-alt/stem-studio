@@ -19,7 +19,10 @@ def test_demucs_uses_project_local_model_cache(tmp_path: Path):
         assert "--two-stems" not in command
         return Mock(returncode=0, stdout="", stderr="")
 
-    with patch("stem_studio.audio.subprocess.run", side_effect=fake_run) as run:
+    with (
+        patch("stem_studio.audio.probe_duration_seconds", return_value=1),
+        patch("stem_studio.audio.subprocess.run", side_effect=fake_run) as run,
+    ):
         outputs = run_demucs(source, tmp_path / "output")
 
     assert run.call_count == 1
@@ -41,6 +44,7 @@ def test_demucs_karaoke_mode_uses_two_stem_output(tmp_path: Path):
         return Mock(returncode=0, stdout="", stderr="")
 
     with (
+        patch("stem_studio.audio.probe_duration_seconds", return_value=1),
         patch("stem_studio.audio.subprocess.run", side_effect=fake_run) as run,
         patch("stem_studio.audio.AudioSegment.from_file") as read_stem,
     ):
@@ -62,7 +66,10 @@ def test_demucs_karaoke_mode_requires_no_vocals_output(tmp_path: Path):
         AudioSegment.silent(duration=100).export(stem_dir / "vocals.wav", format="wav")
         return Mock(returncode=0, stdout="", stderr="")
 
-    with patch("stem_studio.audio.subprocess.run", side_effect=fake_run):
+    with (
+        patch("stem_studio.audio.probe_duration_seconds", return_value=1),
+        patch("stem_studio.audio.subprocess.run", side_effect=fake_run),
+    ):
         try:
             run_demucs(source, tmp_path / "output", karaoke_only=True)
         except RuntimeError as error:

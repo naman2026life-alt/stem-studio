@@ -109,6 +109,43 @@ def test_rejects_unsupported_file(monkeypatch, tmp_path: Path):
     assert response.status_code == 415
 
 
+def test_rejects_unreadable_audio_before_queueing_gpu_work(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(api, "WORK_ROOT", tmp_path)
+    api.jobs.clear()
+
+    response = TestClient(api.app).post(
+        "/jobs",
+        files={"file": ("broken.wav", b"not an audio stream", "audio/wav")},
+    )
+
+    assert response.status_code == 422
+    assert "could not be read" in response.json()["detail"]
+    assert not api.jobs
+    assert not list(tmp_path.iterdir())
+
+
+def test_rejects_overlong_audio_before_queueing_gpu_work(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(api, "WORK_ROOT", tmp_path)
+    monkeypatch.setattr(
+        api,
+        "probe_duration_seconds",
+        lambda path: api.MAX_SEPARATION_DURATION_SECONDS + 1,
+    )
+    api.jobs.clear()
+    wav = io.BytesIO()
+    Sine(330).to_audio_segment(duration=100).export(wav, format="wav")
+
+    response = TestClient(api.app).post(
+        "/jobs",
+        files={"file": ("long.wav", wav.getvalue(), "audio/wav")},
+    )
+
+    assert response.status_code == 422
+    assert "30 minutes or shorter" in response.json()["detail"]
+    assert not api.jobs
+    assert not list(tmp_path.iterdir())
+
+
 def test_rejects_unknown_separation_mode(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(api, "WORK_ROOT", tmp_path)
     api.jobs.clear()
@@ -162,6 +199,32 @@ def test_share_mp3_failure_keeps_wav_job_available(monkeypatch, tmp_path: Path):
     assert client.get(f"/jobs/{job_id}/share/instrumental").status_code == 404
 
 
+def test_separation_failure_returns_safe_terminal_status(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(api, "WORK_ROOT", tmp_path)
+    api.jobs.clear()
+    monkeypatch.setattr(
+        api,
+        "run_demucs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("private backend detail")),
+    )
+    wav = io.BytesIO()
+    Sine(330).to_audio_segment(duration=100).export(wav, format="wav")
+    client = TestClient(api.app)
+
+    response = client.post("/jobs", files={"file": ("test.wav", wav.getvalue(), "audio/wav")})
+    job_id = response.json()["id"]
+    for _ in range(50):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] == "failed":
+            break
+        time.sleep(0.02)
+
+    assert job["status"] == "failed"
+    assert job["progress"] == 100
+    assert job["error"] == api.SEPARATION_ERROR_MESSAGE
+    assert "private backend detail" not in job["error"]
+
+
 def test_trim_merge_tool_clamps_end_to_duration(tmp_path: Path):
     client = TestClient(api.app)
     wav = io.BytesIO()
@@ -197,6 +260,114 @@ def test_trim_merge_rejects_empty_parts():
     )
 
     assert response.status_code == 422
+
+
+def test_mix_uploaded_tracks_returns_temporary_wav_and_mp3(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(api, "WORK_ROOT", tmp_path)
+    api.mixes.clear()
+    instrumental = io.BytesIO()
+    vocal = io.BytesIO()
+    Sine(220).to_audio_segment(duration=1000).export(instrumental, format="wav")
+    Sine(440).to_audio_segment(duration=500).export(vocal, format="wav")
+    client = TestClient(api.app)
+
+    response = client.post(
+        "/tools/mix",
+        files={
+            "instrumental": ("instrumental.wav", instrumental.getvalue(), "audio/wav"),
+            "vocal": ("vocal.wav", vocal.getvalue(), "audio/wav"),
+        },
+        data={
+            "offset_ms": "250",
+            "trim_start_seconds": "0.1",
+            "trim_end_seconds": "0.4",
+            "vocal_gain_db": "-1.5",
+            "instrumental_gain_db": "-3",
+        },
+    )
+
+    assert response.status_code == 200
+    mix = response.json()
+    assert mix["status"] == "completed"
+    assert 3590 <= mix["expires_in_seconds"] <= 3600
+    for key, content_type in (("wav_url", "audio/wav"), ("mp3_url", "audio/mpeg")):
+        output = client.get(mix[key])
+        assert output.status_code == 200
+        assert output.headers["content-type"] == content_type
+        assert output.headers["cache-control"] == "private, no-store"
+        assert 990 <= len(AudioSegment.from_file(io.BytesIO(output.content))) <= 1010
+    mix_directory = tmp_path / "mixes" / mix["id"]
+    assert not (mix_directory / "instrumental-input").exists()
+    assert not (mix_directory / "vocal-input").exists()
+
+
+def test_mix_can_reuse_completed_instrumental_job(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(api, "WORK_ROOT", tmp_path)
+    api.jobs.clear()
+    api.mixes.clear()
+    job_id = "a" * 32
+    output_directory = tmp_path / job_id / "outputs"
+    output_directory.mkdir(parents=True)
+    Sine(220).to_audio_segment(duration=700).export(output_directory / "instrumental.wav", format="wav")
+    now = time.time()
+    api.jobs[job_id] = api.Job(
+        id=job_id,
+        source_name="song.wav",
+        status="completed",
+        progress=100,
+        created_at=now,
+        expires_at=now + 60,
+        instrumental_url=f"/jobs/{job_id}/files/instrumental",
+    )
+    vocal = io.BytesIO()
+    Sine(440).to_audio_segment(duration=300).export(vocal, format="wav")
+
+    response = TestClient(api.app).post(
+        "/tools/mix",
+        files={"vocal": ("vocal.wav", vocal.getvalue(), "audio/wav")},
+        data={"instrumental_job_id": job_id},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+
+
+def test_mix_rejects_ambiguous_or_expired_instrumental(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(api, "WORK_ROOT", tmp_path)
+    api.jobs.clear()
+    api.mixes.clear()
+    job_id = "b" * 32
+    now = time.time()
+    api.jobs[job_id] = api.Job(
+        id=job_id,
+        source_name="song.wav",
+        status="completed",
+        progress=100,
+        created_at=now - 120,
+        expires_at=now - 1,
+        instrumental_url=f"/jobs/{job_id}/files/instrumental",
+    )
+    tone = io.BytesIO()
+    Sine(440).to_audio_segment(duration=100).export(tone, format="wav")
+    payload = tone.getvalue()
+    client = TestClient(api.app)
+
+    ambiguous = client.post(
+        "/tools/mix",
+        files={
+            "instrumental": ("instrumental.wav", payload, "audio/wav"),
+            "vocal": ("vocal.wav", payload, "audio/wav"),
+        },
+        data={"instrumental_job_id": job_id},
+    )
+    expired = client.post(
+        "/tools/mix",
+        files={"vocal": ("vocal.wav", payload, "audio/wav")},
+        data={"instrumental_job_id": job_id},
+    )
+
+    assert ambiguous.status_code == 422
+    assert expired.status_code == 404
 
 
 def test_youtube_import_job_becomes_downloadable_mp3(monkeypatch, tmp_path: Path):

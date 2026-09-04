@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import io
 import json
 import time
@@ -173,6 +174,185 @@ class _NoopModalVolume:
     def __init__(self) -> None:
         self.reload = _NoopModalVolumeAction()
         self.commit = _NoopModalVolumeAction()
+
+
+def _upload_headers(secret: str) -> dict[str, str]:
+    timestamp = str(int(time.time()))
+    signature = hmac.new(secret.encode(), f"{timestamp}:upload".encode(), hashlib.sha256).hexdigest()
+    return {"X-Stem-Timestamp": timestamp, "X-Stem-Signature": signature}
+
+
+def _write_completed_stem_job(root: Path, job_id: str, *, expires_at: float, status: str = "completed") -> None:
+    output_directory = root / "jobs" / job_id / "outputs"
+    output_directory.mkdir(parents=True)
+    Sine(220).to_audio_segment(duration=500).export(output_directory / "instrumental.wav", format="wav")
+    Sine(220).to_audio_segment(duration=500).export(output_directory / "instrumental.mp3", format="mp3")
+    (root / "jobs" / job_id / "status.json").write_text(
+        json.dumps(
+            {
+                "id": job_id,
+                "source_name": "song.wav",
+                "mode": "stems",
+                "status": status,
+                "expires_at": expires_at,
+                "instrumental_url": f"/jobs/{job_id}/files/instrumental",
+            }
+        )
+    )
+
+
+def test_modal_stem_download_requires_completed_unexpired_job(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(modal_app, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(modal_app, "data_volume", _NoopModalVolume())
+    job_id = "a" * 32
+    _write_completed_stem_job(tmp_path, job_id, expires_at=time.time() - 1)
+    client = TestClient(modal_app.web.local())
+
+    assert client.get(f"/jobs/{job_id}/files/instrumental").status_code == 404
+    assert client.get(f"/jobs/{job_id}/share/instrumental").status_code == 404
+
+    status_path = tmp_path / "jobs" / job_id / "status.json"
+    status = json.loads(status_path.read_text())
+    status["expires_at"] = time.time() + 60
+    status["status"] = "failed"
+    status_path.write_text(json.dumps(status))
+    assert client.get(f"/jobs/{job_id}/files/instrumental").status_code == 404
+
+    status["status"] = "completed"
+    status_path.write_text(json.dumps(status))
+    wav = client.get(f"/jobs/{job_id}/files/instrumental")
+    mp3 = client.get(f"/jobs/{job_id}/share/instrumental")
+    assert wav.status_code == 200
+    assert mp3.status_code == 200
+    assert wav.headers["cache-control"] == "private, no-store"
+    assert mp3.headers["cache-control"] == "private, no-store"
+
+
+def test_modal_mix_reuses_completed_job_and_publishes_expiring_files(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(modal_app, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(modal_app, "data_volume", _NoopModalVolume())
+    monkeypatch.setenv("PROCESSOR_SHARED_SECRET", "mix-secret")
+    job_id = "b" * 32
+    _write_completed_stem_job(tmp_path, job_id, expires_at=time.time() + 60)
+    vocal = io.BytesIO()
+    Sine(440).to_audio_segment(duration=300).export(vocal, format="wav")
+    client = TestClient(modal_app.web.local())
+
+    response = client.post(
+        "/tools/mix",
+        files={"vocal": ("vocal.wav", vocal.getvalue(), "audio/wav")},
+        data={"instrumental_job_id": job_id, "offset_ms": "100"},
+        headers=_upload_headers("mix-secret"),
+    )
+
+    assert response.status_code == 200
+    mix = response.json()
+    assert mix["status"] == "completed"
+    assert 3590 <= mix["expires_in_seconds"] <= 3600
+    assert set(mix) == {"id", "status", "created_at", "wav_url", "mp3_url", "expires_in_seconds"}
+    for key, content_type in (("wav_url", "audio/wav"), ("mp3_url", "audio/mpeg")):
+        output = client.get(mix[key])
+        assert output.status_code == 200
+        assert output.headers["content-type"] == content_type
+        assert output.headers["cache-control"] == "private, no-store"
+
+
+def test_modal_separation_without_visible_source_fails_safely(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(modal_app, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(modal_app, "data_volume", _NoopModalVolume())
+    monkeypatch.setattr(modal_app, "model_volume", _NoopModalVolume())
+    job_id = "c" * 32
+    directory = tmp_path / "jobs" / job_id
+    directory.mkdir(parents=True)
+    (directory / "status.json").write_text(
+        json.dumps(
+            {
+                "id": job_id,
+                "status": "queued",
+                "expires_at": time.time() + 60,
+            }
+        )
+    )
+
+    modal_app.separate.local(job_id)
+
+    status = json.loads((directory / "status.json").read_text())
+    assert status["status"] == "failed"
+    assert status["progress"] == 100
+    assert status["error"] == modal_app.SEPARATION_ERROR_MESSAGE
+
+
+def test_modal_separation_queue_is_bounded(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(modal_app, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(modal_app, "data_volume", _NoopModalVolume())
+    monkeypatch.setenv("PROCESSOR_SHARED_SECRET", "queue-secret")
+    now = time.time()
+    for index in range(modal_app.MAX_PENDING_JOBS):
+        job_id = f"{index + 1:032x}"
+        directory = tmp_path / "jobs" / job_id
+        directory.mkdir(parents=True)
+        (directory / "status.json").write_text(
+            json.dumps({"id": job_id, "status": "queued", "expires_at": now + 60})
+        )
+    wav = io.BytesIO()
+    Sine(330).to_audio_segment(duration=100).export(wav, format="wav")
+
+    response = TestClient(modal_app.web.local()).post(
+        "/jobs",
+        files={"file": ("song.wav", wav.getvalue(), "audio/wav")},
+        headers=_upload_headers("queue-secret"),
+    )
+
+    assert response.status_code == 429
+    assert len(list((tmp_path / "jobs").glob("*/status.json"))) == modal_app.MAX_PENDING_JOBS
+
+
+def test_modal_spawn_failure_sets_safe_terminal_status(monkeypatch, tmp_path: Path):
+    class FailingSpawn:
+        async def aio(self, *args, **kwargs):
+            raise RuntimeError("private Modal failure")
+
+    class FailingSeparate:
+        spawn = FailingSpawn()
+
+    monkeypatch.setattr(modal_app, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(modal_app, "data_volume", _NoopModalVolume())
+    monkeypatch.setattr(modal_app, "separate", FailingSeparate())
+    monkeypatch.setenv("PROCESSOR_SHARED_SECRET", "spawn-secret")
+    wav = io.BytesIO()
+    Sine(330).to_audio_segment(duration=100).export(wav, format="wav")
+
+    response = TestClient(modal_app.web.local()).post(
+        "/jobs",
+        files={"file": ("song.wav", wav.getvalue(), "audio/wav")},
+        headers=_upload_headers("spawn-secret"),
+    )
+
+    assert response.status_code == 503
+    status_paths = list((tmp_path / "jobs").glob("*/status.json"))
+    assert len(status_paths) == 1
+    status = json.loads(status_paths[0].read_text())
+    assert status["status"] == "failed"
+    assert status["progress"] == 100
+    assert "private Modal failure" not in status["error"]
+    assert not list(status_paths[0].parent.glob("source.*"))
+
+
+def test_modal_cleanup_removes_expired_mix_and_corrupt_status(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(modal_app, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(modal_app, "data_volume", _NoopModalVolume())
+    expired_mix = tmp_path / "mixes" / ("d" * 32)
+    expired_mix.mkdir(parents=True)
+    (expired_mix / "status.json").write_text(json.dumps({"expires_at": time.time() - 1}))
+    corrupt_job = tmp_path / "jobs" / ("e" * 32)
+    corrupt_job.mkdir(parents=True)
+    (corrupt_job / "status.json").write_text(json.dumps({"expires_at": None}))
+
+    removed = modal_app.cleanup_expired.local()
+
+    assert removed == 2
+    assert not expired_mix.exists()
+    assert not corrupt_job.exists()
 
 
 def test_home_worker_broker_requires_auth_and_completes_claimed_mp3(monkeypatch, tmp_path: Path):

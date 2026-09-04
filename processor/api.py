@@ -4,7 +4,9 @@ import asyncio
 import hashlib
 import hmac
 import json
+import math
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -21,9 +23,12 @@ from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
 from stem_studio.audio import (
+    MAX_SEPARATION_DURATION_SECONDS,
     SUPPORTED_EXTENSIONS,
     SUPPORTED_VIDEO_EXTENSIONS,
     extract_audio_to_mp3,
+    mix_tracks,
+    probe_duration_seconds,
     run_demucs,
     transcode_audio_to_mp3,
     trim_and_merge_audio,
@@ -43,6 +48,12 @@ MAX_PENDING_IMPORTS = int(os.environ.get("MAX_PENDING_IMPORTS", "1"))
 YOUTUBE_IMPORT_TIMEOUT_SECONDS = int(os.environ.get("YOUTUBE_IMPORT_TIMEOUT_SECONDS", "900"))
 UPLOAD_TOKEN_TTL_SECONDS = 300
 CHUNK_BYTES = 1024 * 1024
+MAX_MIX_OFFSET_MS = 10 * 60 * 1000
+MIN_MIX_GAIN_DB = -60.0
+MAX_MIX_GAIN_DB = 24.0
+SEPARATION_ERROR_MESSAGE = "The audio could not be separated. Check the file and try again."
+MIX_ERROR_MESSAGE = "These tracks could not be mixed. Check both audio files and the timing controls."
+RESOURCE_ID_PATTERN = re.compile(r"[a-f0-9]{32}")
 WORK_ROOT = Path(os.environ.get("STEM_STUDIO_WORK_ROOT", tempfile.gettempdir())) / "stem-studio-api"
 WORK_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -76,8 +87,19 @@ class YouTubeImportJob:
     duration_seconds: float | None = None
 
 
+@dataclass
+class MixJob:
+    id: str
+    status: str
+    created_at: float
+    expires_at: float
+    wav_url: str
+    mp3_url: str
+
+
 jobs: dict[str, Job] = {}
 youtube_imports: dict[str, YouTubeImportJob] = {}
+mixes: dict[str, MixJob] = {}
 jobs_lock = threading.Lock()
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stem-studio")
 youtube_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stem-studio-youtube")
@@ -114,12 +136,24 @@ def _public_youtube_import(job: YouTubeImportJob) -> dict[str, object]:
     return result
 
 
+def _public_mix(job: MixJob) -> dict[str, object]:
+    result = asdict(job)
+    result.pop("expires_at")
+    result["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(job.created_at))
+    result["expires_in_seconds"] = max(0, round(job.expires_at - time.time()))
+    return result
+
+
 def _job_dir(job_id: str) -> Path:
     return WORK_ROOT / job_id
 
 
 def _youtube_import_dir(job_id: str) -> Path:
     return WORK_ROOT / "youtube-imports" / job_id
+
+
+def _mix_dir(mix_id: str) -> Path:
+    return WORK_ROOT / "mixes" / mix_id
 
 
 def _cleanup_expired() -> None:
@@ -136,10 +170,15 @@ def _cleanup_expired() -> None:
         expired_imports = [job_id for job_id, job in youtube_imports.items() if job.expires_at <= now]
         for job_id in expired_imports:
             youtube_imports.pop(job_id, None)
+        expired_mixes = [mix_id for mix_id, mix in mixes.items() if mix.expires_at <= now]
+        for mix_id in expired_mixes:
+            mixes.pop(mix_id, None)
     for job_id in expired:
         shutil.rmtree(_job_dir(job_id), ignore_errors=True)
     for job_id in expired_imports:
         shutil.rmtree(_youtube_import_dir(job_id), ignore_errors=True)
+    for mix_id in expired_mixes:
+        shutil.rmtree(_mix_dir(mix_id), ignore_errors=True)
 
 
 def _verify_upload_token(timestamp: str | None, signature: str | None) -> None:
@@ -188,6 +227,17 @@ async def _save_upload(file: UploadFile, directory: Path, allowed_extensions: se
     return source
 
 
+async def _validate_separation_source(source: Path, directory: Path) -> None:
+    try:
+        duration = await asyncio.to_thread(probe_duration_seconds, source)
+    except (OSError, RuntimeError, ValueError) as exc:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise HTTPException(status_code=422, detail="This audio file could not be read. Try converting it to MP3 or WAV.") from exc
+    if duration > MAX_SEPARATION_DURATION_SECONDS:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise HTTPException(status_code=422, detail="Choose an audio file that is 30 minutes or shorter for separation.")
+
+
 def _parse_segments(value: str) -> list[tuple[float, float | None]]:
     try:
         payload = json.loads(value)
@@ -209,6 +259,51 @@ def _parse_segments(value: str) -> list[tuple[float, float | None]]:
             raise HTTPException(status_code=422, detail=f"Part {index} has an invalid end time.")
         result.append((float(start), None if end is None else float(end)))
     return result
+
+
+def _validate_resource_id(value: str, resource_name: str) -> str:
+    if not RESOURCE_ID_PATTERN.fullmatch(value):
+        raise HTTPException(status_code=404, detail=f"This {resource_name} could not be found.")
+    return value
+
+
+def _validate_mix_controls(
+    offset_ms: int,
+    trim_start_seconds: float,
+    trim_end_seconds: float,
+    vocal_gain_db: float,
+    instrumental_gain_db: float,
+) -> None:
+    values = (trim_start_seconds, trim_end_seconds, vocal_gain_db, instrumental_gain_db)
+    if any(isinstance(value, bool) or not math.isfinite(float(value)) for value in values):
+        raise HTTPException(status_code=422, detail="The mix controls contain an invalid number.")
+    if abs(offset_ms) > MAX_MIX_OFFSET_MS:
+        raise HTTPException(status_code=422, detail="Keep the vocal offset within 10 minutes.")
+    if trim_start_seconds < 0 or trim_end_seconds < 0:
+        raise HTTPException(status_code=422, detail="Vocal trim times cannot be negative.")
+    if trim_end_seconds > 0 and trim_end_seconds <= trim_start_seconds:
+        raise HTTPException(status_code=422, detail="Vocal trim end must be after trim start.")
+    if not MIN_MIX_GAIN_DB <= vocal_gain_db <= MAX_MIX_GAIN_DB:
+        raise HTTPException(status_code=422, detail="Keep vocal gain between -60 dB and +24 dB.")
+    if not MIN_MIX_GAIN_DB <= instrumental_gain_db <= MAX_MIX_GAIN_DB:
+        raise HTTPException(status_code=422, detail="Keep instrumental gain between -60 dB and +24 dB.")
+
+
+def _completed_instrumental_path(job_id: str) -> Path:
+    _validate_resource_id(job_id, "separation job")
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if (
+            not job
+            or job.status != "completed"
+            or job.expires_at <= time.time()
+            or not job.instrumental_url
+        ):
+            raise HTTPException(status_code=404, detail="This instrumental is not available.")
+        path = _job_dir(job_id) / "outputs" / "instrumental.wav"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="This instrumental expired or could not be found.")
+    return path
 
 
 def _set_job(job_id: str, **values: object) -> None:
@@ -252,9 +347,9 @@ def _process_job(job_id: str, source: Path, mode: Literal["stems", "karaoke"] = 
                 urls[f"{stem}_url"] = f"/jobs/{job_id}/files/{stem}"
         source.unlink(missing_ok=True)
         _set_job(job_id, status="completed", progress=100, **urls)
-    except Exception as exc:
+    except Exception:
         source.unlink(missing_ok=True)
-        _set_job(job_id, status="failed", error=str(exc)[:1000])
+        _set_job(job_id, status="failed", progress=100, error=SEPARATION_ERROR_MESSAGE)
 
 
 def _process_youtube_import(job_id: str, canonical_url: str) -> None:
@@ -315,14 +410,10 @@ async def create_job(
     if mode not in {"stems", "karaoke"}:
         raise HTTPException(status_code=422, detail="Choose either stems or karaoke mode.")
     validated_mode: Literal["stems", "karaoke"] = "karaoke" if mode == "karaoke" else "stems"
-    with jobs_lock:
-        pending = sum(job.status in {"queued", "processing"} for job in jobs.values())
-    if pending >= MAX_PENDING_JOBS:
-        raise HTTPException(status_code=429, detail="The processor is busy. Please try again shortly.")
-
     job_id = uuid.uuid4().hex
     directory = _job_dir(job_id)
     source = await _save_upload(file, directory, SUPPORTED_EXTENSIONS)
+    await _validate_separation_source(source, directory)
 
     now = time.time()
     job = Job(
@@ -335,8 +426,25 @@ async def create_job(
         expires_at=now + JOB_TTL_SECONDS,
     )
     with jobs_lock:
+        pending = sum(existing.status in {"queued", "processing"} for existing in jobs.values())
+        if pending >= MAX_PENDING_JOBS:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise HTTPException(status_code=429, detail="The processor is busy. Please try again shortly.")
         jobs[job_id] = job
-    executor.submit(_process_job, job_id, source, validated_mode)
+    try:
+        executor.submit(_process_job, job_id, source, validated_mode)
+    except RuntimeError as exc:
+        source.unlink(missing_ok=True)
+        _set_job(
+            job_id,
+            status="failed",
+            progress=100,
+            error="The separation worker could not start. Please try again shortly.",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="The separation worker could not start. Please try again shortly.",
+        ) from exc
     return _public_job(job)
 
 
@@ -388,6 +496,105 @@ async def trim_merge(
         filename=output.name,
         background=BackgroundTask(shutil.rmtree, directory, ignore_errors=True),
     )
+
+
+@app.post("/tools/mix")
+async def create_mix(
+    vocal: UploadFile = File(...),
+    instrumental: UploadFile | None = File(default=None),
+    instrumental_job_id: str | None = Form(default=None),
+    offset_ms: int = Form(0),
+    trim_start_seconds: float = Form(0),
+    trim_end_seconds: float = Form(0),
+    vocal_gain_db: float = Form(0),
+    instrumental_gain_db: float = Form(0),
+    x_stem_timestamp: str | None = Header(default=None),
+    x_stem_signature: str | None = Header(default=None),
+) -> dict[str, object]:
+    _cleanup_expired()
+    _verify_upload_token(x_stem_timestamp, x_stem_signature)
+    reference_id = (instrumental_job_id or "").strip() or None
+    if (instrumental is None) == (reference_id is None):
+        if instrumental is not None:
+            await instrumental.close()
+        await vocal.close()
+        raise HTTPException(
+            status_code=422,
+            detail="Provide either an instrumental file or a completed instrumental job, but not both.",
+        )
+    try:
+        _validate_mix_controls(
+            offset_ms,
+            trim_start_seconds,
+            trim_end_seconds,
+            vocal_gain_db,
+            instrumental_gain_db,
+        )
+    except HTTPException:
+        if instrumental is not None:
+            await instrumental.close()
+        await vocal.close()
+        raise
+
+    if reference_id is not None:
+        try:
+            instrumental_source = _completed_instrumental_path(reference_id)
+        except HTTPException:
+            await vocal.close()
+            raise
+    else:
+        instrumental_source = Path()
+
+    mix_id = uuid.uuid4().hex
+    mix_directory = _mix_dir(mix_id)
+    try:
+        if instrumental is not None:
+            instrumental_source = await _save_upload(
+                instrumental,
+                mix_directory / "instrumental-input",
+                SUPPORTED_EXTENSIONS,
+            )
+        vocal_source = await _save_upload(
+            vocal,
+            mix_directory / "vocal-input",
+            SUPPORTED_EXTENSIONS,
+        )
+        wav_path, mp3_path = await asyncio.to_thread(
+            mix_tracks,
+            instrumental_source,
+            vocal_source,
+            mix_directory,
+            offset_ms=offset_ms,
+            trim_start_seconds=trim_start_seconds,
+            trim_end_seconds=trim_end_seconds,
+            vocal_gain_db=vocal_gain_db,
+            instrumental_gain_db=instrumental_gain_db,
+        )
+        wav_path.replace(mix_directory / "mix.wav")
+        mp3_path.replace(mix_directory / "mix.mp3")
+        shutil.rmtree(mix_directory / "instrumental-input", ignore_errors=True)
+        shutil.rmtree(mix_directory / "vocal-input", ignore_errors=True)
+        now = time.time()
+        job = MixJob(
+            id=mix_id,
+            status="completed",
+            created_at=now,
+            expires_at=now + JOB_TTL_SECONDS,
+            wav_url=f"/mixes/{mix_id}/files/wav",
+            mp3_url=f"/mixes/{mix_id}/files/mp3",
+        )
+        with jobs_lock:
+            mixes[mix_id] = job
+    except HTTPException:
+        shutil.rmtree(mix_directory, ignore_errors=True)
+        raise
+    except ValueError as exc:
+        shutil.rmtree(mix_directory, ignore_errors=True)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        shutil.rmtree(mix_directory, ignore_errors=True)
+        raise HTTPException(status_code=422, detail=MIX_ERROR_MESSAGE) from exc
+    return _public_mix(job)
 
 
 @app.post("/imports/youtube", status_code=202)
@@ -521,3 +728,25 @@ def share_stem(job_id: str, stem: str) -> FileResponse:
     safe_name = Path(job.source_name).stem or "song"
     output_name = "karaoke" if job.mode == "karaoke" and stem == "instrumental" else stem
     return FileResponse(path, media_type="audio/mpeg", filename=f"{safe_name}-{output_name}.mp3")
+
+
+@app.get("/mixes/{mix_id}/files/{file_format}")
+def download_mix(mix_id: str, file_format: str) -> FileResponse:
+    _cleanup_expired()
+    if file_format not in {"wav", "mp3"}:
+        raise HTTPException(status_code=404, detail="Unknown mix format.")
+    _validate_resource_id(mix_id, "mix")
+    with jobs_lock:
+        job = mixes.get(mix_id)
+        if not job or job.status != "completed" or job.expires_at <= time.time():
+            raise HTTPException(status_code=404, detail="This mix is not available.")
+    path = _mix_dir(mix_id) / f"mix.{file_format}"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="This mix expired or could not be found.")
+    media_type = "audio/wav" if file_format == "wav" else "audio/mpeg"
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=f"stem-studio-mix.{file_format}",
+        headers={"Cache-Control": "private, no-store"},
+    )

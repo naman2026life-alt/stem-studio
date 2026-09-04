@@ -20,6 +20,7 @@ import {
   RotateCcw,
   Scissors,
   Smartphone,
+  SlidersHorizontal,
   Trash2,
   UnlockKeyhole,
   WandSparkles,
@@ -28,7 +29,8 @@ import {
 
 import { DurationPicker } from "@/components/duration-picker";
 import { ExportActions } from "@/components/export-actions";
-import type { SeparationJob, SeparationMode, YouTubeImportJob } from "@/lib/types";
+import { VocalMixer, type MixerInstrumentalOption, type VocalMixRequest } from "@/components/vocal-mixer";
+import type { SeparationJob, SeparationMode, VocalMixResult, YouTubeImportJob } from "@/lib/types";
 
 const AUDIO_EXTENSIONS = /\.(mp3|wav|m4a|flac|aac|ogg|webm)$/i;
 const VIDEO_EXTENSIONS = /\.(mp4|mov|m4v|mkv|webm|avi)$/i;
@@ -43,14 +45,37 @@ const YOUTUBE_IMPORT_SESSION_KEY = "stem-studio-youtube-import-id";
 const YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 
 type MediaKind = "audio" | "video";
-type BusyAction = "convert" | "trim" | "youtube" | SeparationMode | null;
+type BusyAction = "convert" | "mix" | "trim" | "youtube" | SeparationMode | null;
 type ProtectedAction = Exclude<BusyAction, null> | "youtube_cancel";
 type RecordingState = "idle" | "requesting" | "recording" | "paused" | "processing";
 type TrimPart = { id: number; start: string; end: string };
 type PickerTarget = { field: "start" | "end"; partId: number; partIndex: number };
 type UploadToken = { timestamp?: string; signature?: string };
+type FeedbackKind = "error" | "info" | "success";
+type Feedback = { kind: FeedbackKind; text: string } | null;
 
 let nextPartId = 2;
+
+function readStoredJobIds() {
+  if (typeof window === "undefined") return [] as string[];
+  try {
+    const raw = localStorage.getItem(SESSION_KEY) ?? sessionStorage.getItem(SESSION_KEY) ?? "[]";
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((id): id is string => typeof id === "string" && id.length > 0).slice(0, 50);
+  } catch {
+    return [];
+  }
+}
+
+function storeJobIds(ids: string[]) {
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify([...new Set(ids)].slice(0, 50)));
+    sessionStorage.removeItem(SESSION_KEY);
+  } catch {
+    // Storage can be unavailable in private browsing. The in-memory list still works.
+  }
+}
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat(undefined, {
@@ -158,6 +183,10 @@ function outputUrl(processorUrl: string, path: string) {
   return new URL(path, `${processorUrl}/`).toString();
 }
 
+function scrollBehavior(): ScrollBehavior {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+}
+
 function stemFileName(
   sourceName: string,
   stem: "instrumental" | "drums" | "vocals",
@@ -199,7 +228,8 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   const [workingState, setWorkingState] = useState<"original" | "converted" | "imported" | "edited">("original");
   const [baseWorkingState, setBaseWorkingState] = useState<"original" | "converted" | "imported">("original");
   const [audioDuration, setAudioDuration] = useState(0);
-  const [parts, setParts] = useState<TrimPart[]>([{ id: 1, start: "00:00", end: "00:09" }]);
+  const [parts, setParts] = useState<TrimPart[]>([{ id: 1, start: "00:00", end: "" }]);
+  const [partsDirty, setPartsDirty] = useState(false);
   const [accessPassword, setAccessPassword] = useState("");
   const [passwordDraft, setPasswordDraft] = useState("");
   const [accessVerified, setAccessVerified] = useState(false);
@@ -211,7 +241,10 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [youtubeRightsConfirmed, setYoutubeRightsConfirmed] = useState(false);
   const [youtubeImportId, setYoutubeImportId] = useState("");
-  const [message, setMessage] = useState("");
+  const [feedback, setFeedback] = useState<Feedback>(null);
+  const [mixerInstrumental, setMixerInstrumental] = useState("upload");
+  const [mixResult, setMixResult] = useState<VocalMixResult | null>(null);
+  const message = feedback?.text ?? "";
   const inputRef = useRef<HTMLInputElement>(null);
   const unlockDialogRef = useRef<HTMLFormElement>(null);
   const unlockInputRef = useRef<HTMLInputElement>(null);
@@ -221,53 +254,72 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   const microphoneStreamRef = useRef<MediaStream | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
   const youtubePollAbortRef = useRef<AbortController | null>(null);
-  const sourceUrl = useObjectUrl(sourceFile);
+  const pendingMixRef = useRef<VocalMixRequest | null>(null);
+  const mixerSectionRef = useRef<HTMLDivElement>(null);
+  const sourceUrl = useObjectUrl(sourceKind === "video" ? sourceFile : null);
   const audioUrl = useObjectUrl(workingAudio);
+
+  const setMessage = useCallback((text: string, kind: FeedbackKind = "info") => {
+    setFeedback(text ? { kind, text } : null);
+  }, []);
 
   const rememberJobs = useCallback((nextJobs: SeparationJob[]) => {
     setJobs(nextJobs);
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify(nextJobs.map((job) => job.id)));
+    storeJobIds([...nextJobs.map((job) => job.id), ...readStoredJobIds()]);
   }, []);
 
   const refreshJobs = useCallback(async (knownJobs?: SeparationJob[]) => {
     if (!processorUrl) return;
     const current = knownJobs ?? jobs;
-    const storedIds = current.length
-      ? current.map((job) => job.id)
-      : JSON.parse(sessionStorage.getItem(SESSION_KEY) || "[]") as string[];
+    const storedIds = [...new Set([...current.map((job) => job.id), ...readStoredJobIds()])];
     if (!storedIds.length) return;
     const results = await Promise.all(storedIds.map(async (id) => {
       try {
         const response = await fetch(`${processorUrl}/jobs/${id}`, { cache: "no-store" });
-        return response.ok ? await response.json() as SeparationJob : null;
+        if (response.ok) return { id, job: await response.json() as SeparationJob, remove: false };
+        return { id, job: current.find((job) => job.id === id) ?? null, remove: response.status === 404 || response.status === 410 };
       } catch {
-        return current.find((job) => job.id === id) ?? null;
+        return { id, job: current.find((job) => job.id === id) ?? null, remove: false };
       }
     }));
-    rememberJobs(results.filter((job): job is SeparationJob => Boolean(job)));
-  }, [jobs, processorUrl, rememberJobs]);
+    setJobs(results
+      .filter((result) => !result.remove)
+      .map((result) => result.job)
+      .filter((job): job is SeparationJob => Boolean(job)));
+    storeJobIds(results.filter((result) => !result.remove).map((result) => result.id));
+  }, [jobs, processorUrl]);
 
   useEffect(() => {
     let cancelled = false;
+    let retryTimer: number | undefined;
+    let attempts = 0;
     const restore = async () => {
       if (!processorUrl) return;
-      const ids = JSON.parse(sessionStorage.getItem(SESSION_KEY) || "[]") as string[];
+      attempts += 1;
+      const ids = readStoredJobIds();
       const results = await Promise.all(ids.map(async (id) => {
         try {
           const response = await fetch(`${processorUrl}/jobs/${id}`, { cache: "no-store" });
-          return response.ok ? await response.json() as SeparationJob : null;
+          if (response.ok) return { id, job: await response.json() as SeparationJob, remove: false };
+          return { id, job: null, remove: response.status === 404 || response.status === 410 };
         } catch {
-          return null;
+          return { id, job: null, remove: false };
         }
       }));
-      if (!cancelled) rememberJobs(results.filter((job): job is SeparationJob => Boolean(job)));
+      if (!cancelled) {
+        setJobs(results.map((result) => result.job).filter((job): job is SeparationJob => Boolean(job)));
+        storeJobIds(results.filter((result) => !result.remove).map((result) => result.id));
+        const hasTransientFailure = results.some((result) => !result.remove && !result.job);
+        if (hasTransientFailure && attempts < 6) retryTimer = window.setTimeout(() => void restore(), 5000);
+      }
     };
     const timer = window.setTimeout(() => void restore(), 0);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
+      if (retryTimer) window.clearTimeout(retryTimer);
     };
-  }, [processorUrl, rememberJobs]);
+  }, [processorUrl]);
 
   useEffect(() => {
     const active = jobs.some((job) => job.status === "queued" || job.status === "processing");
@@ -275,6 +327,21 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     const timer = window.setInterval(() => void refreshJobs(), 3000);
     return () => window.clearInterval(timer);
   }, [jobs, refreshJobs]);
+
+  useEffect(() => {
+    if (!jobs.length && !mixResult) return;
+    const timer = window.setInterval(() => {
+      setJobs((current) => current.map((job) => ({
+        ...job,
+        expires_in_seconds: Math.max(0, job.expires_in_seconds - 60),
+      })));
+      setMixResult((current) => current ? {
+        ...current,
+        expires_in_seconds: Math.max(0, current.expires_in_seconds - 60),
+      } : null);
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [jobs.length, mixResult]);
 
   useEffect(() => {
     if (recordingState !== "recording") return;
@@ -324,7 +391,8 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   }, []);
 
   function resetParts() {
-    setParts([{ id: nextPartId++, start: "00:00", end: "00:09" }]);
+    setParts([{ id: nextPartId++, start: "00:00", end: "" }]);
+    setPartsDirty(false);
   }
 
   function stopMicrophoneTracks() {
@@ -345,7 +413,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
 
   async function startRecording() {
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-      setMessage("This browser cannot record audio here. Update iOS or use the file picker instead.");
+      setMessage("This browser cannot record audio here. Update iOS or use the file picker instead.", "error");
       return;
     }
     setRecordingState("requesting");
@@ -378,7 +446,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       recorder.onerror = () => {
         stopMicrophoneTracks();
         setRecordingState("idle");
-        setMessage("The recording stopped unexpectedly. Please try again.");
+        setMessage("The recording stopped unexpectedly. Please try again.", "error");
       };
       recorder.onstop = () => {
         const chunks = recordedChunksRef.current;
@@ -387,7 +455,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
         mediaRecorderRef.current = null;
         setRecordingState("idle");
         if (!chunks.length) {
-          setMessage("No audio was captured. Please check microphone permission and retry.");
+          setMessage("No audio was captured. Please check microphone permission and retry.", "error");
           return;
         }
         const blob = new Blob(chunks, { type: finalType });
@@ -398,7 +466,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
           { type: finalType },
         );
         activateRecordedAudio(file);
-        setMessage("Recording ready. Preview it below, then save, share, trim, or isolate it.");
+        setMessage("Recording ready. Preview it below, then save, share, trim, or isolate it.", "success");
       };
       recorder.start(1000);
       setRecordingState("recording");
@@ -408,11 +476,11 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       setRecordingState("idle");
       const name = error instanceof DOMException ? error.name : "";
       if (name === "NotAllowedError") {
-        setMessage("Microphone access was blocked. Allow microphone access for this site in Safari or Chrome settings, then retry.");
+        setMessage("Microphone access was blocked. Allow microphone access for this site in Safari or Chrome settings, then retry.", "error");
       } else if (name === "NotFoundError") {
-        setMessage("No microphone was found on this device.");
+        setMessage("No microphone was found on this device.", "error");
       } else {
-        setMessage("Could not start the microphone. Please retry or choose an existing audio file.");
+        setMessage("Could not start the microphone. Please retry or choose an existing audio file.", "error");
       }
     }
   }
@@ -455,12 +523,12 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     }
     if (selected.size > MAX_BYTES) {
       event.target.value = "";
-      return setMessage("Choose a file smaller than 150 MB.");
+      return setMessage("Choose a file smaller than 150 MB.", "error");
     }
     const kind = mediaKind(selected);
     if (!kind) {
       event.target.value = "";
-      return setMessage("Use a common audio file or MP4, MOV, M4V, MKV, WEBM, or AVI video.");
+      return setMessage("Use a common audio file or MP4, MOV, M4V, MKV, WEBM, or AVI video.", "error");
     }
     setSourceFile(selected);
     setSourceKind(kind);
@@ -556,7 +624,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       await new Promise((resolve) => window.setTimeout(resolve, pollDelay));
     }
     throw new Error("This YouTube import exceeded its processing window. Please try again.");
-  }, [processorUrl]);
+  }, [processorUrl, setMessage]);
 
   const activateYouTubeImport = useCallback(async (completed: YouTubeImportJob, signal?: AbortSignal) => {
     if (!completed.file_url) throw new Error("The imported MP3 is not available.");
@@ -580,13 +648,14 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     setWorkingState("imported");
     setBaseWorkingState("imported");
     setAudioDuration(0);
-    setParts([{ id: nextPartId++, start: "00:00", end: "00:09" }]);
+    setParts([{ id: nextPartId++, start: "00:00", end: "" }]);
+    setPartsDirty(false);
     localStorage.removeItem(YOUTUBE_IMPORT_SESSION_KEY);
     setYoutubeImportId("");
     setYoutubeUrl("");
     setYoutubeRightsConfirmed(false);
-    setMessage("YouTube audio imported. The MP3 is now ready to preview, save, trim, or isolate.");
-  }, [processorUrl]);
+    setMessage("YouTube audio imported. The MP3 is now ready to preview, save, trim, or isolate.", "success");
+  }, [processorUrl, setMessage]);
 
   async function importFromYouTube(password?: string) {
     if (!processorUrl) return;
@@ -623,7 +692,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       await activateYouTubeImport(completed, controller.signal);
     } catch (error) {
       if (!controller.signal.aborted) {
-        setMessage(error instanceof Error ? error.message : "YouTube audio import failed. Please retry.");
+        setMessage(error instanceof Error ? error.message : "YouTube audio import failed. Please retry.", "error");
       }
     } finally {
       if (youtubePollAbortRef.current === controller) youtubePollAbortRef.current = null;
@@ -647,9 +716,9 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       localStorage.removeItem(YOUTUBE_IMPORT_SESSION_KEY);
       setYoutubeImportId("");
       setBusyAction(null);
-      setMessage("YouTube import cancelled. You can start another one.");
+      setMessage("YouTube import cancelled. You can start another one.", "success");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Could not cancel this import. Please retry.");
+      setMessage(error instanceof Error ? error.message : "Could not cancel this import. Please retry.", "error");
     }
   }
 
@@ -665,7 +734,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
         await activateYouTubeImport(completed, controller.signal);
       } catch (error) {
         if (!controller.signal.aborted) {
-          setMessage(error instanceof Error ? error.message : "Could not reconnect to the YouTube import.");
+          setMessage(error instanceof Error ? error.message : "Could not reconnect to the YouTube import.", "error");
         }
       } finally {
         if (!controller.signal.aborted) setBusyAction(null);
@@ -683,7 +752,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       controller.abort();
       if (youtubePollAbortRef.current === controller) youtubePollAbortRef.current = null;
     };
-  }, [activateYouTubeImport, pollYouTubeImport, processorUrl]);
+  }, [activateYouTubeImport, pollYouTubeImport, processorUrl, setMessage]);
 
   async function convertVideo(password?: string) {
     if (!sourceFile || sourceKind !== "video" || !processorUrl) return;
@@ -701,9 +770,9 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       setBaseWorkingState("converted");
       setAudioDuration(0);
       resetParts();
-      setMessage("Video converted. The MP3 is ready to edit, save, share, or isolate.");
+      setMessage("Video converted. The MP3 is ready to edit, save, share, or isolate.", "success");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Video conversion failed. Please retry.");
+      setMessage(error instanceof Error ? error.message : "Video conversion failed. Please retry.", "error");
     } finally {
       setBusyAction(null);
     }
@@ -711,14 +780,20 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
 
   function updatePart(id: number, field: "start" | "end", value: string) {
     setParts((current) => current.map((part) => part.id === id ? { ...part, [field]: value } : part));
+    setPartsDirty(true);
   }
 
   function addPart() {
-    setParts((current) => [...current, { id: nextPartId++, start: "00:00", end: "" }]);
+    setParts((current) => {
+      const previousEnd = current.at(-1)?.end || "00:00";
+      return [...current, { id: nextPartId++, start: previousEnd, end: "" }];
+    });
+    setPartsDirty(true);
   }
 
   function removePart(id: number) {
     setParts((current) => current.filter((part) => part.id !== id));
+    setPartsDirty(true);
   }
 
   function openDurationPicker(target: PickerTarget, trigger: HTMLButtonElement) {
@@ -772,9 +847,9 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       setWorkingState("edited");
       setAudioDuration(0);
       resetParts();
-      setMessage("Trimmed and merged. This MP3 is now the active file for isolation.");
+      setMessage("Trimmed and merged. This MP3 is now the active file for isolation.", "success");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Trim and merge failed. Please retry.");
+      setMessage(error instanceof Error ? error.message : "Trim and merge failed. Please retry.", "error");
     } finally {
       setBusyAction(null);
     }
@@ -786,7 +861,46 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     setWorkingState(baseWorkingState);
     setAudioDuration(0);
     resetParts();
-    setMessage("Restored the full audio file.");
+    setMessage("Restored the full audio file.", "success");
+  }
+
+  async function createVocalMix(request: VocalMixRequest, password?: string) {
+    if (!processorUrl) return;
+    setBusyAction("mix");
+    setMixResult(null);
+    setMessage("Uploading the vocal and preparing your mix…");
+    try {
+      const token = await requestToken(password);
+      const form = new FormData();
+      if (request.instrumentalFile) form.append("instrumental", request.instrumentalFile);
+      if (request.instrumentalJobId) form.append("instrumental_job_id", request.instrumentalJobId);
+      form.append("vocal", request.vocalFile);
+      form.append("offset_ms", String(request.offsetMs));
+      form.append("trim_start_seconds", String(request.trimStartSeconds));
+      form.append("trim_end_seconds", String(request.trimEndSeconds));
+      form.append("vocal_gain_db", String(request.vocalGainDb));
+      form.append("instrumental_gain_db", String(request.instrumentalGainDb));
+      const response = await fetch(`${processorUrl}/tools/mix`, {
+        method: "POST",
+        headers: tokenHeaders(token),
+        body: form,
+      });
+      if (!response.ok) throw new Error(await parseResponseError(response));
+      const result = await response.json() as VocalMixResult;
+      if (!result.wav_url || !result.mp3_url) throw new Error("The mix finished without downloadable files. Please retry.");
+      setMixResult(result);
+      setMessage("Your vocal mix is ready to preview, save, or share.", "success");
+      window.setTimeout(() => mixerSectionRef.current?.scrollIntoView({ behavior: scrollBehavior(), block: "start" }), 0);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Vocal mixing failed. Please retry.", "error");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  function requestVocalMix(request: VocalMixRequest) {
+    pendingMixRef.current = request;
+    runProtectedAction("mix");
   }
 
   async function queueSeparation(mode: SeparationMode, password?: string) {
@@ -808,8 +922,13 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
         };
         upload.onerror = () => reject(new Error("Could not reach the audio processor."));
         upload.onload = () => {
-          if (upload.status >= 200 && upload.status < 300) resolve(JSON.parse(upload.responseText) as SeparationJob);
-          else reject(new Error(parseUploadError(upload)));
+          if (upload.status >= 200 && upload.status < 300) {
+            try {
+              resolve(JSON.parse(upload.responseText) as SeparationJob);
+            } catch {
+              reject(new Error("The processor returned an unreadable response. Please retry."));
+            }
+          } else reject(new Error(parseUploadError(upload)));
         };
         upload.send(form);
       });
@@ -819,7 +938,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
         ? "Uploaded. Your no-vocals karaoke track is now being created."
         : "Uploaded. Instrumental, drums, and vocals are now being isolated.");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Upload failed. Please retry.");
+      setMessage(error instanceof Error ? error.message : "Upload failed. Please retry.", "error");
     } finally {
       setBusyAction(null);
     }
@@ -829,6 +948,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     if (action === "youtube") void importFromYouTube(password);
     if (action === "youtube_cancel") void cancelYouTubeImport(password);
     if (action === "convert") void convertVideo(password);
+    if (action === "mix" && pendingMixRef.current) void createVocalMix(pendingMixRef.current, password);
     if (action === "trim") void trimAndMerge(password);
     if (action === "stems") void queueSeparation("stems", password);
     if (action === "karaoke") void queueSeparation("karaoke", password);
@@ -868,10 +988,35 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   const pickerInitialSeconds = typeof pickerParsedValue === "number" && Number.isFinite(pickerParsedValue)
     ? pickerParsedValue
     : 0;
+  const mixerInstrumentalOptions: MixerInstrumentalOption[] = jobs
+    .filter((job) => job.status === "completed" && job.expires_in_seconds > 0 && Boolean(job.instrumental_url))
+    .map((job) => ({
+      id: job.id,
+      label: `${job.source_name} · ${job.mode === "karaoke" ? "karaoke" : "instrumental"}`,
+    }));
+  const activeJob = jobs.find((job) => job.status === "queued" || job.status === "processing");
+  const completedJobCount = jobs.filter((job) => job.status === "completed").length;
+  const failedJob = jobs.find((job) => job.status === "failed");
+  const selectedMixerInstrumental = mixerInstrumental === "upload"
+    || mixerInstrumentalOptions.some((option) => option.id === mixerInstrumental)
+    ? mixerInstrumental
+    : "upload";
+
+  function showMixerWithJob(jobId: string) {
+    setMixerInstrumental(jobId);
+    window.setTimeout(() => mixerSectionRef.current?.scrollIntoView({ behavior: scrollBehavior(), block: "start" }), 0);
+  }
+
+  function clearResults() {
+    setJobs([]);
+    setMixerInstrumental("upload");
+    storeJobIds([]);
+    setMessage("Temporary results cleared from this page.", "success");
+  }
 
   return (
     <section className="studio-grid mt-10 grid gap-5 xl:grid-cols-[1.08fr_.92fr]">
-      <article className="glass rounded-[2rem] p-6 sm:p-8">
+      <article className="glass workspace-panel rounded-[2rem] p-6 sm:p-8">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <p className="eyebrow">Media workspace</p>
@@ -1051,14 +1196,15 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
             <div className="active-audio-actions mt-4">
               <ExportActions file={workingAudio} key={`${workingAudio.name}-${workingAudio.size}-${workingAudio.lastModified}`} showHint />
               {workingState === "edited" && <button className="button-ghost" disabled={busy} onClick={restoreBaseAudio} type="button"><RotateCcw size={16} />Restore full audio</button>}
+              <button className="button-ghost" disabled={busy} onClick={() => mixerSectionRef.current?.scrollIntoView({ behavior: scrollBehavior(), block: "start" })} type="button"><SlidersHorizontal size={16} />Mix a vocal</button>
             </div>
           </section>
         )}
 
         {workingAudio && (
-          <section className="workflow-card mt-5" aria-labelledby="trim-heading">
+          <section className="workflow-card trim-card mt-5" aria-labelledby="trim-heading">
             <div className="step-heading">
-              <span className="step-number">{sourceKind === "video" ? "3" : "2"}</span>
+              <span className="step-number">{sourceKind === "video" ? "4" : "3"}</span>
               <div><h3 id="trim-heading">Choose parts to keep</h3><p>Tap a time to use the scroll wheels, or type seconds, MM:SS, or HH:MM:SS.</p></div>
             </div>
             <div className="mt-4 space-y-3">
@@ -1103,9 +1249,9 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
             <p className="mt-3 text-xs leading-5 text-slate-500">Times beyond {audioDuration ? formatDuration(audioDuration) : "the end"} are automatically capped at the end of the audio. Leave End blank to use the full remaining track.</p>
             <div className="mt-4 grid gap-2 sm:grid-cols-2">
               <button className="button-ghost justify-center" disabled={busy || parts.length >= 50} onClick={addPart} type="button"><Plus size={16} />Add another part</button>
-              <button className="button-primary justify-center" disabled={busy} onClick={() => runProtectedAction("trim")} type="button">
+              <button className="button-primary justify-center" disabled={busy || !partsDirty} onClick={() => runProtectedAction("trim")} type="button">
                 {busyAction === "trim" ? <LoaderCircle className="animate-spin" size={18} /> : <Scissors size={17} />}
-                {busyAction === "trim" ? "Trimming…" : "Trim & merge parts"}
+                {busyAction === "trim" ? "Trimming…" : partsDirty ? "Apply trim & merge" : "Edit a time to apply"}
               </button>
             </div>
             {accessProtected && !accessVerified && <p className="processing-hint"><LockKeyhole size={13} />Private processing—password requested after you tap.</p>}
@@ -1113,9 +1259,9 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
         )}
 
         {workingAudio && (
-          <section className="workflow-card mt-5" aria-labelledby="isolate-heading">
+          <section className="workflow-card isolate-card mt-5" aria-labelledby="isolate-heading">
             <div className="step-heading">
-              <span className="step-number">{sourceKind === "video" ? "4" : "3"}</span>
+              <span className="step-number">{sourceKind === "video" ? "3" : "2"}</span>
               <div><h3 id="isolate-heading">Choose what to create</h3><p>Make one karaoke track with the vocals removed, or split the audio into all three useful tracks.</p></div>
             </div>
             <div className="active-source-chip mt-4">
@@ -1125,6 +1271,12 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
                 <strong>{workingAudio.name}</strong>
               </span>
             </div>
+            {partsDirty && (
+              <div className="unapplied-edit mt-3" role="status">
+                <div><Scissors size={16} /><span><strong>Section edits are not applied yet.</strong> Apply them before creating audio so the full track is never used by mistake.</span></div>
+                <button disabled={busy} onClick={() => runProtectedAction("trim")} type="button">Apply section edits</button>
+              </div>
+            )}
             <div className="separation-mode-grid mt-3">
               <article className="separation-mode-card is-karaoke">
                 <div className="separation-mode-topline">
@@ -1138,7 +1290,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
                 <button
                   aria-label={`Remove vocals from ${workingAudio.name} and make a karaoke track`}
                   className="button-primary w-full justify-center"
-                  disabled={busy || !configured}
+                  disabled={busy || !configured || partsDirty}
                   onClick={() => runProtectedAction("karaoke")}
                   type="button"
                 >
@@ -1158,7 +1310,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
                 <button
                   aria-label={`Create instrumental, drums, and vocals tracks from ${workingAudio.name}`}
                   className="button-ghost w-full justify-center"
-                  disabled={busy || !configured}
+                  disabled={busy || !configured || partsDirty}
                   onClick={() => runProtectedAction("stems")}
                   type="button"
                 >
@@ -1171,19 +1323,33 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
           </section>
         )}
 
+        <div className="mixer-section mt-5" ref={mixerSectionRef}>
+          <VocalMixer
+            activeAudio={workingAudio}
+            busy={busy}
+            configured={configured}
+            instrumentalOptions={mixerInstrumentalOptions}
+            onCreate={requestVocalMix}
+            onInstrumentalChange={setMixerInstrumental}
+            processorUrl={processorUrl}
+            result={mixResult}
+            selectedInstrumental={selectedMixerInstrumental}
+          />
+          {accessProtected && !accessVerified && <p className="processing-hint"><LockKeyhole size={13} />Private processing—password requested after you tap Create vocal mix.</p>}
+        </div>
+
         {!configured && (
           <div className="notice-card mt-4">
             <p className="font-medium text-amber-100">Processor connection pending</p>
             <p className="mt-1 text-xs leading-5 text-amber-100/70">The interface is ready. Add the processing service URL to enable uploads.</p>
           </div>
         )}
-        {message && <p className="status-message mt-4" role="status">{message}</p>}
       </article>
 
-      <article className="glass self-start rounded-[2rem] p-6 sm:p-8">
+      <article className="glass results-panel self-start rounded-[2rem] p-6 sm:p-8" id="processed-results">
         <div className="flex items-end justify-between gap-4">
           <div><p className="eyebrow">Temporary results</p><h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">Your processed audio</h2></div>
-          {jobs.length > 0 && <button className="text-sm text-violet-300 hover:text-violet-200" onClick={() => void refreshJobs()} type="button">Refresh</button>}
+          {jobs.length > 0 && <div className="result-toolbar"><button onClick={() => void refreshJobs()} type="button">Refresh</button><button onClick={clearResults} type="button">Clear</button></div>}
         </div>
         <div className="mt-6 space-y-3">
           {jobs.length === 0 && <div className="empty-state"><FileAudio size={28} /><p>Your karaoke tracks and stems will appear here.</p></div>}
@@ -1199,6 +1365,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-medium text-white">{job.source_name}</p>
                     <p aria-live="polite" className="mt-1 text-xs capitalize text-slate-400">{jobMode === "karaoke" ? "Karaoke" : "3 tracks"} · {job.status} · {job.progress}% · {formatDate(job.created_at)}</p>
+                    <p className="job-expiry">{job.expires_in_seconds > 0 ? `Available for about ${Math.max(1, Math.ceil(job.expires_in_seconds / 60))} more minutes` : "This temporary result has expired"}</p>
                     {job.error && <p className="mt-2 text-xs leading-5 text-rose-300">{job.error}</p>}
                   </div>
                 </div>
@@ -1224,6 +1391,11 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
                             shareMimeType="audio/mpeg"
                             shareRemoteUrl={outputUrl(processorUrl, `/jobs/${job.id}/share/${stem}`)}
                           />
+                          {stem === "instrumental" && (
+                            <button className="use-in-mixer-button" onClick={() => showMixerWithJob(job.id)} type="button">
+                              <SlidersHorizontal size={15} />Use in vocal mix
+                            </button>
+                          )}
                         </div>
                       );
                     })}
@@ -1252,6 +1424,25 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
         </div>
       </article>
 
+      {jobs.length > 0 && (
+        <button
+          className={`mobile-results-dock${!activeJob && completedJobCount > 0 ? " is-ready" : failedJob && !activeJob ? " is-error" : ""}`}
+          onClick={() => document.getElementById("processed-results")?.scrollIntoView({ behavior: scrollBehavior(), block: "start" })}
+          type="button"
+        >
+          {activeJob ? <LoaderCircle className="animate-spin" size={17} /> : completedJobCount > 0 ? <CheckCircle2 size={17} /> : <XCircle size={17} />}
+          <span>{activeJob ? `${activeJob.mode === "karaoke" ? "Karaoke" : "Isolation"} · ${activeJob.progress}%` : completedJobCount > 0 ? `${completedJobCount} result${completedJobCount === 1 ? "" : "s"} ready` : "Processing needs attention"}</span>
+          <strong>View</strong>
+        </button>
+      )}
+
+      {feedback && (
+        <div className={`status-message status-toast is-${feedback.kind}`} role={feedback.kind === "error" ? "alert" : "status"}>
+          <span>{feedback.text}</span>
+          <button aria-label="Dismiss message" onClick={() => setFeedback(null)} type="button"><XCircle size={17} /></button>
+        </div>
+      )}
+
       {pendingAction && (
         <div className="unlock-backdrop">
           <form
@@ -1272,6 +1463,8 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
                   ? "convert this video"
                   : pendingAction === "karaoke"
                     ? "remove the vocals and make a karaoke track"
+                    : pendingAction === "mix"
+                      ? "mix this vocal with the selected instrumental"
                     : pendingAction === "youtube"
                       ? "privately import this YouTube audio"
                       : pendingAction === "youtube_cancel"

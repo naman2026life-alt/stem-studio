@@ -1,6 +1,6 @@
 # Stem Studio
 
-Stem Studio accepts audio or video, can privately import permitted audio from a single YouTube video, can extract a video's audio as MP3, keeps and joins multiple time ranges, and includes a dedicated **Karaoke mode** that removes detected vocals and returns one backing track. It can also split the active audio into **instrumental/no-vocals**, **drums-only**, and **vocals-only** tracks. The local app includes a mixer for placing a separately recorded vocal over the instrumental with offset, trim, and gain controls.
+Stem Studio accepts audio or video, can privately import permitted audio from a single YouTube video, can extract a video's audio as MP3, keeps and joins multiple time ranges, and includes a dedicated **Karaoke mode** that removes detected vocals and returns one backing track. It can also split the active audio into **instrumental/no-vocals**, **drums-only**, and **vocals-only** tracks, then mix a separately recorded vocal over an instrumental with offset, trim, and gain controls.
 
 ## Where it lives
 
@@ -27,6 +27,7 @@ Modal (temporary FFmpeg tools + Demucs on a T4 GPU)
   │              downloads over the home connection and returns the MP3
   ├── video → MP3 (optional; CPU)
   ├── ordered trim + merge → MP3 (optional; CPU)
+  ├── instrumental + recorded vocal → WAV + MP3 mix (CPU)
   ├── Karaoke mode → karaoke.wav (drums + bass + other)
   ├── or full split → instrumental.wav + drums.wav + vocals.wav
   └── compact 192 kbps MP3 copies prepared for mobile sharing
@@ -35,7 +36,7 @@ Modal (temporary FFmpeg tools + Demucs on a T4 GPU)
                         immediately and queued jobs after one hour
 ```
 
-Vercel serves the interface but does not run Demucs. A full song can exceed the duration, memory, and package constraints of a free web function. Modal scales the processor to zero between jobs and provides $30/month of compute credit on its free Starter plan at the time this architecture was chosen.
+Vercel serves the interface but does not run Demucs. A full song can exceed the duration, memory, and package constraints of a free web function. Modal scales the processor to zero between jobs. Credits and pricing can change, so check the current usage and spending-limit controls in the Modal dashboard before running many separation jobs.
 
 ## Local Gradio app (Apple Silicon)
 
@@ -171,13 +172,14 @@ Use one container worker. The portable API keeps temporary job state in its loca
 - Existing iPhone recordings: Safari and Chrome use the native Files picker. Voice Memos normally shares recordings as M4A, which is accepted directly after the user exports it through the iOS Share sheet.
 - Home Screen app: in iPhone Safari, use **Share → Add to Home Screen**. The web-app manifest, standalone display mode, theme, and Apple touch icon are included.
 - Upload limit: 150 MB per operation.
-- Trim and merge: add up to 50 ordered parts using raw seconds, `MM:SS`, or `HH:MM:SS`. An empty end uses the rest of the file; values beyond the duration are capped at the end.
+- Separation and mixing limit: each input must be 30 minutes or shorter; separation audio is validated before GPU work is queued. Trim inputs may be up to 60 minutes.
+- Trim and merge: add up to 50 ordered parts using raw seconds, `MM:SS`, or `HH:MM:SS`. An empty end uses the rest of the file; values beyond the duration are capped at the end. The combined output is capped at 60 minutes to prevent accidental runaway files.
 - Mobile duration picker: tapping Start or End opens touch-scroll wheels for hours, minutes, and seconds, plus an exact **End of track** shortcut. Desktop typing remains available.
 - The uploaded, recorded, converted, or trimmed file becomes the active audio and can be previewed, saved to the device, shared through the native share sheet, edited again, or isolated.
 - Karaoke mode: one prominent action removes detected vocals and returns a `*-karaoke.wav` backing track. The full-split option remains available for instrumental/no-vocals, drums, and vocals.
 - Every output includes browser preview, **Save to device**, and **Share to WhatsApp** actions. Compact 192 kbps MP3 copies are prepared in the background so an iPhone can open its share sheet with one tap without first fetching a full WAV. The full-quality WAV remains the saved output.
-- Local mixing: manual vocal offset, trim start/end, vocal gain, instrumental gain, WAV preview, and WAV/320 kbps MP3 export.
-- Hosted retention: no account or permanent library; source and outputs expire after one hour.
+- Vocal mixing: choose a still-available instrumental result or upload another backing track, add a separately recorded vocal (or use the active recording), then adjust manual offset, vocal trim, vocal gain, and instrumental gain. Preview the result and export WAV or 320 kbps MP3.
+- Hosted retention: no account or permanent library; source, stem, and mix outputs expire after one hour.
 
 ## Validation
 
@@ -185,6 +187,7 @@ Use one container worker. The portable API keeps temporary job state in its loca
 source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest -q
+ruff check app.py modal_app.py processor stem_studio tests
 python -m py_compile modal_app.py processor/api.py
 
 cd web
@@ -206,7 +209,6 @@ Tests use generated tones; no copyrighted music or model weights are committed.
 - A website cannot silently choose a WhatsApp recipient. **Share to WhatsApp** opens the operating system share sheet with the file attached; the user must select WhatsApp and the destination chat. Browsers without file-sharing support save the file so it can be attached manually.
 - Hosted jobs are intentionally temporary. Refresh recovery works within the same browser session, but there is no long-term history.
 - YouTube changes its delivery and bot protection frequently. Private, members-only, age-restricted, and region-blocked videos remain unsupported. For otherwise usable videos that reject Modal's datacenter IP, the authenticated home helper retries over the Mac/PC's normal connection. Stem Studio never imports browser cookies or Google credentials. If both routes are rejected, upload an audio file you are authorized to use directly.
-- Vocal recording/mixing is currently in the local Gradio app; the hosted release focuses on karaoke/no-vocals, drums-only, and vocals-only outputs.
 
 ## License
 

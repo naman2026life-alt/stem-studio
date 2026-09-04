@@ -14,6 +14,10 @@ from pydub import AudioSegment
 SUPPORTED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".webm"}
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
 SUPPORTED_MEDIA_EXTENSIONS = SUPPORTED_EXTENSIONS | SUPPORTED_VIDEO_EXTENSIONS
+MAX_SEPARATION_DURATION_SECONDS = 30 * 60
+MAX_EDIT_INPUT_DURATION_SECONDS = 60 * 60
+MAX_MIX_INPUT_DURATION_SECONDS = 30 * 60
+MAX_MERGED_DURATION_SECONDS = 60 * 60
 
 
 def validate_audio(path: str | Path) -> Path:
@@ -34,15 +38,6 @@ def validate_media(path: str | Path) -> Path:
             f"Unsupported format: {media_path.suffix}. Use a common audio file or MP4, MOV, M4V, MKV, WEBM, or AVI."
         )
     return media_path
-
-
-def media_kind(path: str | Path) -> str:
-    suffix = Path(path).suffix.lower()
-    if suffix in SUPPORTED_EXTENSIONS:
-        return "audio"
-    if suffix in SUPPORTED_VIDEO_EXTENSIONS:
-        return "video"
-    raise ValueError(f"Unsupported format: {suffix or 'unknown'}.")
 
 
 def _command_error(result: subprocess.CompletedProcess[str], fallback: str) -> RuntimeError:
@@ -120,9 +115,12 @@ def trim_and_merge_audio(
     source_path = validate_audio(source)
     if not segments:
         raise ValueError("Add at least one part to trim and merge.")
+    if probe_duration_seconds(source_path) > MAX_EDIT_INPUT_DURATION_SECONDS:
+        raise ValueError("Choose an audio file that is 60 minutes or shorter for editing.")
     audio = AudioSegment.from_file(source_path)
     duration_seconds = len(audio) / 1000
-    merged = AudioSegment.empty()
+    normalized_segments: list[tuple[float, float]] = []
+    merged_duration_seconds = 0.0
     for index, (raw_start, raw_end) in enumerate(segments, start=1):
         start = float(raw_start)
         end = duration_seconds if raw_end is None else float(raw_end)
@@ -132,6 +130,13 @@ def trim_and_merge_audio(
         end = min(duration_seconds, max(0, end))
         if end <= start:
             raise ValueError(f"Part {index} must end after it starts.")
+        merged_duration_seconds += end - start
+        if merged_duration_seconds > MAX_MERGED_DURATION_SECONDS:
+            raise ValueError("Keep the combined trim-and-merge result to 60 minutes or less.")
+        normalized_segments.append((start, end))
+
+    merged = AudioSegment.empty()
+    for start, end in normalized_segments:
         merged += audio[round(start * 1000):round(end * 1000)]
 
     destination = Path(output_path)
@@ -147,6 +152,8 @@ def run_demucs(
     karaoke_only: bool = False,
 ) -> dict[str, Path]:
     source = validate_audio(source)
+    if probe_duration_seconds(source) > MAX_SEPARATION_DURATION_SECONDS:
+        raise ValueError("Choose an audio file that is 30 minutes or shorter for separation.")
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     model_cache = Path(os.environ.get("TORCH_HOME", Path(__file__).resolve().parent.parent / ".model-cache"))
@@ -201,8 +208,16 @@ def mix_tracks(
     vocal_gain_db: float = 0,
     instrumental_gain_db: float = 0,
 ) -> tuple[Path, Path]:
-    instrumental = AudioSegment.from_file(validate_audio(instrumental_path)) + instrumental_gain_db
-    vocal = AudioSegment.from_file(validate_audio(vocal_path)) + vocal_gain_db
+    instrumental_source = validate_audio(instrumental_path)
+    vocal_source = validate_audio(vocal_path)
+    longest_input = max(
+        probe_duration_seconds(instrumental_source),
+        probe_duration_seconds(vocal_source),
+    )
+    if longest_input > MAX_MIX_INPUT_DURATION_SECONDS:
+        raise ValueError("Choose instrumental and vocal files that are 30 minutes or shorter.")
+    instrumental = AudioSegment.from_file(instrumental_source) + instrumental_gain_db
+    vocal = AudioSegment.from_file(vocal_source) + vocal_gain_db
     vocal = _trim(vocal, trim_start_seconds, trim_end_seconds)
 
     if offset_ms < 0:

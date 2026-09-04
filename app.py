@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import atexit
 import shutil
-from pathlib import Path
 
 import gradio as gr
 
@@ -37,6 +37,9 @@ def create_mix(instrumental, vocal, offset, trim_start, trim_end, vocal_gain, in
 
 def cleanup():
     shutil.rmtree(APP_DIR, ignore_errors=True)
+
+
+atexit.register(cleanup)
 
 
 CSS = """
