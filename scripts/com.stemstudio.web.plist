@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.stemstudio.web</string>
+  <key>ProgramArguments</key><array>
+    <string>PYTHON_PLACEHOLDER</string><string>-m</string><string>stem_studio.mac_web</string>
+  </array>
+  <key>WorkingDirectory</key><string>WORKING_DIRECTORY_PLACEHOLDER</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>ExitTimeOut</key><integer>30</integer>
+  <key>AbandonProcessGroup</key><false/>
+  <key>Umask</key><integer>63</integer>
+  <key>StandardOutPath</key><string>STDOUT_PLACEHOLDER</string>
+  <key>StandardErrorPath</key><string>STDERR_PLACEHOLDER</string>
+</dict></plist>

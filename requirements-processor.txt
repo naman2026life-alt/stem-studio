@@ -1,6 +1,7 @@
 demucs==4.0.1
 pydub>=0.25,<1
 torchcodec>=0.8,<1
+torchcrepe==0.0.24
 fastapi>=0.115,<1
 python-multipart>=0.0.20,<1
 uvicorn[standard]>=0.34,<1

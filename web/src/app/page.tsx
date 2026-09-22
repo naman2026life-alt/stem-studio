@@ -1,10 +1,13 @@
-import { Film, MicOff, Music2, Scissors, SlidersHorizontal } from "lucide-react";
+import { Music2 } from "lucide-react";
 
 import { Studio } from "@/components/studio";
 
 export default function Home() {
   const processorUrl = process.env.NEXT_PUBLIC_PROCESSOR_URL?.replace(/\/$/, "") ?? "";
-  const accessProtected = Boolean(process.env.STEM_STUDIO_PASSWORD);
+  const localOnly = process.env.STEM_STUDIO_LOCAL_WEB === "1" && process.env.VERCEL !== "1";
+  const hostedProduction = !localOnly && (process.env.NODE_ENV === "production" || process.env.VERCEL === "1");
+  const accessProtected = hostedProduction || Boolean(process.env.STEM_STUDIO_PASSWORD);
+  const processorLocation = process.env.STEM_STUDIO_PROCESSOR_LOCATION === "mac" ? "mac" : "hosted";
 
   return (
     <main className="shell min-h-screen px-5 py-6 sm:px-8 lg:px-12">
@@ -13,42 +16,24 @@ export default function Home() {
           <div className="brand-mark"><Music2 size={22} /></div>
           <div>
             <p className="text-base font-semibold tracking-tight text-white">Stem Studio</p>
-            <p className="text-xs text-slate-400">Temporary audio workspace</p>
+            <p className="text-xs text-slate-400">A little closer to your music</p>
           </div>
         </div>
         <span className="status-pill"><span className="status-dot" /> No account needed</span>
       </header>
 
-      <section className="home-content mx-auto max-w-6xl pb-20 pt-16 sm:pt-24">
+      <section className="home-content mx-auto max-w-6xl pb-20 pt-9 sm:pt-12">
         <div className="hero-copy max-w-3xl">
           <p className="eyebrow">Built for practice and performance</p>
-          <h1 className="mt-7 text-balance text-5xl font-semibold tracking-[-0.055em] text-white sm:text-7xl">
-            Pull the song apart.<br /><span className="gradient-text">Keep what you need.</span>
+          <h1 className="mt-4 text-balance text-4xl font-semibold tracking-[-0.05em] text-white sm:text-5xl">
+            Your music. <span className="gradient-text">Your voice.</span>
           </h1>
-          <p className="mt-7 max-w-2xl text-pretty text-lg leading-8 text-slate-300">
-            Record a new take or bring your audio or video, remove vocals for karaoke, isolate useful stems, and blend your own vocal back into the instrumental.
+          <p className="mt-4 max-w-2xl text-pretty text-base leading-7 text-slate-400">
+            Make the backing track you need, or get to know the notes you sing. One space to create, practise, and find your sound.
           </p>
         </div>
 
-        <div className="feature-grid mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {[
-            [Film, "Record or upload", "Use your microphone directly or choose existing audio or video."],
-            [Scissors, "Trim and merge", "Keep multiple time ranges and join them in the order you choose."],
-            [MicOff, "Karaoke or full split", "Remove vocals in one tap, or create instrumental, drums, and vocals."],
-            [SlidersHorizontal, "Mix your vocal", "Place, trim, and balance a recorded vocal over the instrumental."],
-          ].map(([Icon, title, text]) => {
-            const FeatureIcon = Icon as typeof Film;
-            return (
-              <article className="feature-card" key={title as string}>
-                <FeatureIcon size={20} className="text-violet-300" />
-                <h2 className="mt-4 font-medium text-white">{title as string}</h2>
-                <p className="mt-2 text-sm leading-6 text-slate-400">{text as string}</p>
-              </article>
-            );
-          })}
-        </div>
-
-        <Studio accessProtected={accessProtected} processorUrl={processorUrl} />
+        <Studio accessProtected={accessProtected} processorLocation={processorLocation} processorUrl={processorUrl} />
       </section>
     </main>
   );

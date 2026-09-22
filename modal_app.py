@@ -358,6 +358,15 @@ def _parse_segments(value: str) -> list[tuple[float, float | None]]:
     volumes={str(DATA_ROOT): data_volume, str(MODEL_ROOT): model_volume},
 )
 def separate(job_id: str, mode: str = "stems") -> None:
+    if mode == "practice":
+        from stem_studio.practice_jobs import process_practice
+
+        process_practice(
+            DATA_ROOT / "practice", job_id, device="cuda", commit=data_volume.commit,
+            reload=data_volume.reload, commit_models=model_volume.commit,
+        )
+        return
+
     from stem_studio.audio import run_demucs, transcode_audio_to_mp3
 
     job_dir = _job_dir(job_id)
@@ -1037,6 +1046,22 @@ def web():
             headers={"Cache-Control": "private, no-store"},
         )
 
+    from stem_studio.practice_jobs import register_practice_routes
+
+    async def queue_practice(job_id: str) -> None:
+        # One GPU container serves both separation and pitch analysis, keeping
+        # their total concurrency at one even when both tabs submit work.
+        await separate.spawn.aio(job_id, "practice")
+
+    async def practice_vocals(job_id: str) -> tuple[str, Path]:
+        status, path = await completed_stem_job(job_id, "vocals")
+        return str(status.get("source_name", "Separated vocal")), path
+
+    register_practice_routes(
+        web_app, root=lambda: DATA_ROOT / "practice", verify_token=_verify_upload_token,
+        save_upload=save_upload, queue_job=queue_practice, completed_vocals=practice_vocals,
+        reload=data_volume.reload.aio, commit=data_volume.commit.aio,
+    )
     return web_app
 
 
@@ -1272,6 +1297,7 @@ def cleanup_expired() -> int:
     cleanup_root(DATA_ROOT / "jobs")
     cleanup_root(DATA_ROOT / "youtube-imports")
     cleanup_root(DATA_ROOT / "mixes")
+    cleanup_root(DATA_ROOT / "practice")
     if removed:
         data_volume.commit()
     return removed

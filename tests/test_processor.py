@@ -454,15 +454,16 @@ def test_stalled_youtube_import_is_failed_and_no_longer_blocks_queue(monkeypatch
     monkeypatch.setattr(api, "WORK_ROOT", tmp_path)
     api.youtube_imports.clear()
     now = time.time()
-    api.youtube_imports["stalled"] = api.YouTubeImportJob(
-        id="stalled",
+    job_id = "a" * 32
+    api.youtube_imports[job_id] = api.YouTubeImportJob(
+        id=job_id,
         status="processing",
         progress=15,
         created_at=now - api.YOUTUBE_IMPORT_TIMEOUT_SECONDS - 1,
         expires_at=now + 60,
     )
 
-    response = TestClient(api.app).get("/imports/youtube/stalled")
+    response = TestClient(api.app).get(f"/imports/youtube/{job_id}")
 
     assert response.status_code == 200
     assert response.json()["status"] == "failed"
