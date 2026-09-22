@@ -1,6 +1,8 @@
 """Laptop service checks: private access, bounded work, and restart recovery."""
 
 import asyncio
+import hashlib
+import hmac
 import json
 import time
 from types import SimpleNamespace
@@ -11,6 +13,18 @@ from fastapi.testclient import TestClient
 
 from processor import api
 from stem_studio.practice_jobs import write_record
+
+COMPUTE_PATHS = [
+    "/jobs", "/tools/extract-mp3", "/tools/trim-merge", "/tools/mix",
+    "/imports/youtube", "/imports/youtube/" + "a" * 32 + "/cancel",
+    "/practice/jobs", "/practice/compare",
+]
+
+
+def signed_headers(secret, *, age=0):
+    stamp = str(int(time.time()) - age)
+    signature = hmac.new(secret.encode(), f"{stamp}:upload".encode(), hashlib.sha256).hexdigest()
+    return {"X-Stem-Timestamp": stamp, "X-Stem-Signature": signature}
 
 
 @pytest.fixture
@@ -63,6 +77,128 @@ def test_remote_requests_cannot_use_local_no_secret_bypass(local_processor):
     response = remote.post("/imports/youtube", data={"url": "https://youtu.be/dQw4w9WgXcQ"})
     assert response.status_code == 503
     assert not api.youtube_imports
+
+
+@pytest.mark.parametrize("path", COMPUTE_PATHS)
+@pytest.mark.parametrize("credential", ["missing", "forged", "expired", "future"])
+def test_every_compute_endpoint_rejects_invalid_tokens_before_parsing_body(local_processor, monkeypatch, path, credential):
+    secret = "direct-request-security-test" * 2
+    monkeypatch.setenv("PROCESSOR_REQUIRE_AUTH", "1")
+    monkeypatch.setenv("PROCESSOR_SHARED_SECRET", secret)
+    if credential == "missing":
+        headers = {}
+    elif credential == "forged":
+        headers = signed_headers("wrong-secret")
+    else:
+        headers = signed_headers(secret, age=301 if credential == "expired" else -301)
+    # Deliberately malformed multipart would produce 400/422 if the body parser
+    # ran first. Every compute path must return 401 before touching it.
+    response = local_processor.post(path, content=b"not a multipart body",
+                                    headers={**headers, "Content-Type": "multipart/form-data; boundary=missing"})
+    assert response.status_code == 401
+    assert not api.jobs and not api.youtube_imports and not api.mixes
+
+
+def test_unauthenticated_asgi_request_never_reads_upload_bytes(local_processor, monkeypatch):
+    monkeypatch.setenv("PROCESSOR_REQUIRE_AUTH", "1")
+    monkeypatch.setenv("PROCESSOR_SHARED_SECRET", "direct-request-security-test" * 2)
+    sent = []
+
+    async def receive():
+        raise AssertionError("An unauthorized request must never spool the upload body")
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+             "scheme": "https", "path": "/jobs", "raw_path": b"/jobs", "query_string": b"",
+             "headers": [(b"content-type", b"multipart/form-data; boundary=ignored")],
+             "client": ("203.0.113.7", 50000), "server": ("studio.example", 443)}
+    asyncio.run(api.app(scope, receive, send))
+    assert next(message for message in sent if message["type"] == "http.response.start")["status"] == 401
+
+
+def test_expired_token_response_is_readable_by_studio_browser(local_processor, monkeypatch):
+    secret = "direct-request-security-test" * 2
+    monkeypatch.setenv("PROCESSOR_SHARED_SECRET", secret)
+    response = local_processor.post("/practice/compare", headers={
+        **signed_headers(secret, age=301), "Origin": "http://localhost:3000",
+    })
+    assert response.status_code == 401
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_browser_preflight_needs_no_token_and_allows_signed_upload_headers(local_processor, monkeypatch):
+    monkeypatch.setenv("PROCESSOR_REQUIRE_AUTH", "1")
+    monkeypatch.setenv("PROCESSOR_SHARED_SECRET", "direct-request-security-test" * 2)
+    response = local_processor.options("/practice/jobs", headers={
+        "Origin": "http://localhost:3000", "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type,x-stem-timestamp,x-stem-signature",
+    })
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert "x-stem-signature" in response.headers["access-control-allow-headers"].lower()
+
+
+def test_signed_json_cancellation_remains_supported(local_processor, monkeypatch):
+    secret = "direct-request-security-test" * 2
+    monkeypatch.setenv("PROCESSOR_SHARED_SECRET", secret)
+    job_id = "a" * 32
+    api.youtube_imports[job_id] = api.YouTubeImportJob(
+        id=job_id, status="queued", progress=3, created_at=time.time(), expires_at=time.time() + 100,
+    )
+    response = local_processor.post(f"/imports/youtube/{job_id}/cancel", json={}, headers=signed_headers(secret))
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
+    assert response.json()["error"] == "YouTube import cancelled."
+
+
+def test_authenticated_oversized_body_is_rejected_before_form_parsing(local_processor, monkeypatch):
+    secret = "direct-request-security-test" * 2
+    monkeypatch.setenv("PROCESSOR_SHARED_SECRET", secret)
+    response = local_processor.post("/jobs", content=b"", headers={
+        **signed_headers(secret), "Content-Length": str(api._request_body_limit("/jobs") + 1),
+    })
+    assert response.status_code == 413
+
+
+@pytest.mark.parametrize("declared_length", [None, "1"])
+def test_streaming_body_limit_cannot_be_bypassed_with_chunking_or_false_length(local_processor, monkeypatch, declared_length):
+    secret = "direct-request-security-test" * 2
+    monkeypatch.setenv("PROCESSOR_SHARED_SECRET", secret)
+    headers = {**signed_headers(secret), "Content-Type": "application/json"}
+    if declared_length is not None:
+        headers["Content-Length"] = declared_length
+
+    def chunks():
+        yield b'{"unnecessary": "'
+        yield b"a" * (65 * 1024)
+        yield b'"}'
+
+    response = local_processor.post("/practice/compare", content=chunks(), headers=headers)
+    assert response.status_code == 413, response.text
+
+
+def test_valid_signed_request_reaches_compute_route(local_processor, monkeypatch):
+    secret = "direct-request-security-test" * 2
+    monkeypatch.setenv("PROCESSOR_REQUIRE_AUTH", "1")
+    monkeypatch.setenv("PROCESSOR_SHARED_SECRET", secret)
+    response = local_processor.post("/practice/compare", headers=signed_headers(secret),
+                                    json={"take_job_id": "a" * 32, "reference_job_id": "b" * 32})
+    assert response.status_code == 404  # Auth passes; these temporary result IDs do not exist.
+
+
+def test_public_health_discloses_no_secret_or_storage_paths(local_processor, monkeypatch):
+    secret = "direct-request-security-test" * 2
+    monkeypatch.setenv("PROCESSOR_REQUIRE_AUTH", "1")
+    monkeypatch.setenv("PROCESSOR_SHARED_SECRET", secret)
+    for endpoint in ("/health", "/ready"):
+        response = local_processor.get(endpoint)
+        assert response.status_code in {200, 503}
+        assert secret not in response.text
+        assert str(api.WORK_ROOT) not in response.text
+        assert str(api.MODEL_ROOT) not in response.text
 
 
 def test_readiness_checks_dependencies_without_loading_models(local_processor, monkeypatch):

@@ -176,13 +176,41 @@ async def _lifespan(application: FastAPI):
 
 
 app = FastAPI(title="Stem Studio Processor", version="1.1.0", lifespan=_lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_allowed_origins(),
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "X-Stem-Timestamp", "X-Stem-Signature"],
-)
+
+
+def _request_body_limit(path: str) -> int:
+    if path == "/practice/compare" or path.startswith("/imports/youtube"):
+        return 64 * 1024
+    # Two independent files are accepted only for mixing. Keep room for
+    # multipart headers; _save_upload also enforces each file's exact cap.
+    return MAX_UPLOAD_BYTES * (2 if path == "/tools/mix" else 1) + 1024 * 1024
+
+
+class BoundedRequestBody:
+    """Enforce limits while streaming, before multipart files can fill disk."""
+
+    def __init__(self, application):
+        self.app = application
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] in {"GET", "HEAD", "OPTIONS"}:
+            return await self.app(scope, receive, send)
+        limit = _request_body_limit(scope["path"])
+        received = 0
+
+        async def bounded_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    raise HTTPException(status_code=413, detail="This upload is too large. Choose a smaller recording.")
+            return message
+
+        await self.app(scope, bounded_receive, send)
+
+
+app.add_middleware(BoundedRequestBody)
 
 
 @app.middleware("http")
@@ -194,12 +222,40 @@ async def protect_remote_requests(request: Request, call_next):
         local_client = client_host in {"127.0.0.1", "::1", "localhost", "testclient"}
         if missing_remote_auth or (not secret and not local_client):
             return JSONResponse(status_code=503, content={"detail": "Remote processing authentication is not configured."})
+        # Authenticate before FastAPI parses JSON/multipart bodies. Handler
+        # checks remain as defence in depth, but cannot protect upload spooling.
+        try:
+            _verify_upload_token(request.headers.get("x-stem-timestamp"), request.headers.get("x-stem-signature"))
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail},
+                                headers={"Cache-Control": "no-store"})
+        length = request.headers.get("content-length")
+        if length is not None:
+            try:
+                size = int(length)
+                if size < 0:
+                    raise ValueError("Negative length")
+            except ValueError:
+                return JSONResponse(status_code=400, content={"detail": "The upload length is invalid."})
+            if size > _request_body_limit(request.url.path):
+                return JSONResponse(status_code=413, content={"detail": "This upload is too large. Choose a smaller recording."})
     response = await call_next(request)
     # Expiring recordings and session metadata must not remain in tunnel/CDN
     # caches after the processor has removed them.
     response.headers.setdefault("Cache-Control", "no-store")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     return response
+
+
+# CORS wraps authentication too, so the real studio can read an expired-token
+# response instead of seeing an opaque browser network error.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins(),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Stem-Timestamp", "X-Stem-Signature"],
+)
 
 
 def _public_job(job: Job) -> dict[str, object]:

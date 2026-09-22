@@ -572,7 +572,10 @@ export function Studio({ accessProtected, processorLocation = "hosted", processo
       setAccessVerified(false);
       throw new Error("The studio password is incorrect. Tap the action again to retry.");
     }
-    if (!tokenResponse.ok) throw new Error("Could not authorize processing. Please retry.");
+    if (!tokenResponse.ok) {
+      const body = await tokenResponse.json().catch(() => ({})) as { error?: unknown };
+      throw new Error(typeof body.error === "string" ? body.error : "Could not authorize processing. Please retry.");
+    }
     if (accessProtected) setAccessVerified(true);
     return await tokenResponse.json() as UploadToken;
   }

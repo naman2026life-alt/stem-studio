@@ -4,7 +4,9 @@ import { Studio } from "@/components/studio";
 
 export default function Home() {
   const processorUrl = process.env.NEXT_PUBLIC_PROCESSOR_URL?.replace(/\/$/, "") ?? "";
-  const accessProtected = Boolean(process.env.STEM_STUDIO_PASSWORD);
+  const localOnly = process.env.STEM_STUDIO_LOCAL_WEB === "1" && process.env.VERCEL !== "1";
+  const hostedProduction = !localOnly && (process.env.NODE_ENV === "production" || process.env.VERCEL === "1");
+  const accessProtected = hostedProduction || Boolean(process.env.STEM_STUDIO_PASSWORD);
   const processorLocation = process.env.STEM_STUDIO_PROCESSOR_LOCATION === "mac" ? "mac" : "hosted";
 
   return (
