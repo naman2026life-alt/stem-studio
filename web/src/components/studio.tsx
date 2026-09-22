@@ -31,6 +31,8 @@ import {
 import { DurationPicker } from "@/components/duration-picker";
 import { ExportActions } from "@/components/export-actions";
 import { SingingCoach } from "@/components/singing-coach";
+import { ProcessorConnection, useProcessorConnection } from "@/components/processor-connection";
+import { isMissingProcessorResource, processingErrorMessage, processorUnavailableMessage, type ProcessorLocation } from "@/lib/processor-connection";
 import { VocalMixer, type MixerInstrumentalOption, type VocalMixRequest } from "@/components/vocal-mixer";
 import type { SeparationJob, SeparationMode, VocalMixResult, YouTubeImportJob } from "@/lib/types";
 
@@ -221,10 +223,12 @@ async function parseResponseError(response: Response) {
   return `Processing failed (${response.status}).`;
 }
 
-export function Studio({ accessProtected, processorUrl }: { accessProtected: boolean; processorUrl: string }) {
+export function Studio({ accessProtected, processorLocation = "hosted", processorUrl }: { accessProtected: boolean; processorLocation?: ProcessorLocation; processorUrl: string }) {
+  const connection = useProcessorConnection(processorUrl, processorLocation);
   const [module, setModule] = useState<"edit" | "coach">("edit");
   const [coachReference, setCoachReference] = useState<string | null>(null);
   const practiceAuthRef = useRef<{ resolve: (headers: Record<string, string>) => void; reject: (error: Error) => void } | null>(null);
+  const connectionWasReadyRef = useRef(false);
   const [jobs, setJobs] = useState<SeparationJob[]>([]);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [sourceKind, setSourceKind] = useState<MediaKind | null>(null);
@@ -282,7 +286,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       try {
         const response = await fetch(`${processorUrl}/jobs/${id}`, { cache: "no-store" });
         if (response.ok) return { id, job: await response.json() as SeparationJob, remove: false };
-        return { id, job: current.find((job) => job.id === id) ?? null, remove: response.status === 404 || response.status === 410 };
+        return { id, job: current.find((job) => job.id === id) ?? null, remove: await isMissingProcessorResource(response) };
       } catch {
         return { id, job: current.find((job) => job.id === id) ?? null, remove: false };
       }
@@ -293,6 +297,12 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       .filter((job): job is SeparationJob => Boolean(job)));
     storeJobIds(results.filter((result) => !result.remove).map((result) => result.id));
   }, [jobs, processorUrl]);
+
+  useEffect(() => {
+    const justReconnected = connection.status === "ready" && !connectionWasReadyRef.current;
+    connectionWasReadyRef.current = connection.status === "ready";
+    if (justReconnected) void refreshJobs();
+  }, [connection.status, refreshJobs]);
 
   useEffect(() => {
     let cancelled = false;
@@ -306,7 +316,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
         try {
           const response = await fetch(`${processorUrl}/jobs/${id}`, { cache: "no-store" });
           if (response.ok) return { id, job: await response.json() as SeparationJob, remove: false };
-          return { id, job: null, remove: response.status === 404 || response.status === 410 };
+          return { id, job: null, remove: await isMissingProcessorResource(response) };
         } catch {
           return { id, job: null, remove: false };
         }
@@ -551,6 +561,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   }
 
   async function requestToken(password = accessPassword): Promise<UploadToken> {
+    await connection.requireReady();
     const tokenResponse = await fetch("/api/upload-token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -608,7 +619,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
           await new Promise((resolve) => window.setTimeout(resolve, Math.min(2000 * connectionFailures, 10000)));
           continue;
         }
-        if (response.status === 404) localStorage.removeItem(YOUTUBE_IMPORT_SESSION_KEY);
+        if (await isMissingProcessorResource(response)) localStorage.removeItem(YOUTUBE_IMPORT_SESSION_KEY);
         throw new Error(await parseResponseError(response));
       }
       connectionFailures = 0;
@@ -643,7 +654,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       throw new Error("The MP3 is ready, but the download was interrupted. Refresh this page to reconnect to the same import.");
     }
     if (!fileResponse.ok) {
-      if (fileResponse.status === 404) localStorage.removeItem(YOUTUBE_IMPORT_SESSION_KEY);
+      if (await isMissingProcessorResource(fileResponse)) localStorage.removeItem(YOUTUBE_IMPORT_SESSION_KEY);
       throw new Error(await parseResponseError(fileResponse));
     }
     const blob = await fileResponse.blob();
@@ -699,7 +710,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       await activateYouTubeImport(completed, controller.signal);
     } catch (error) {
       if (!controller.signal.aborted) {
-        setMessage(error instanceof Error ? error.message : "YouTube audio import failed. Please retry.", "error");
+        setMessage(processingErrorMessage(error, "YouTube audio import failed. Please retry.", processorLocation), "error");
       }
     } finally {
       if (youtubePollAbortRef.current === controller) youtubePollAbortRef.current = null;
@@ -725,7 +736,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       setBusyAction(null);
       setMessage("YouTube import cancelled. You can start another one.", "success");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Could not cancel this import. Please retry.", "error");
+      setMessage(processingErrorMessage(error, "Could not cancel this import. Please retry.", processorLocation), "error");
     }
   }
 
@@ -779,7 +790,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       resetParts();
       setMessage("Video converted. The MP3 is ready to edit, save, share, or isolate.", "success");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Video conversion failed. Please retry.", "error");
+      setMessage(processingErrorMessage(error, "Video conversion failed. Please retry.", processorLocation), "error");
     } finally {
       setBusyAction(null);
     }
@@ -856,7 +867,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       resetParts();
       setMessage("Trimmed and merged. This MP3 is now the active file for isolation.", "success");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Trim and merge failed. Please retry.", "error");
+      setMessage(processingErrorMessage(error, "Trim and merge failed. Please retry.", processorLocation), "error");
     } finally {
       setBusyAction(null);
     }
@@ -899,7 +910,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       setMessage("Your vocal mix is ready to preview, save, or share.", "success");
       window.setTimeout(() => mixerSectionRef.current?.scrollIntoView({ behavior: scrollBehavior(), block: "start" }), 0);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Vocal mixing failed. Please retry.", "error");
+      setMessage(processingErrorMessage(error, "Vocal mixing failed. Please retry.", processorLocation), "error");
     } finally {
       setBusyAction(null);
     }
@@ -927,7 +938,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
         upload.upload.onprogress = (event) => {
           if (event.lengthComputable) setMessage(`Uploading for ${mode === "karaoke" ? "karaoke mode" : "isolation"}… ${Math.round((event.loaded / event.total) * 100)}%`);
         };
-        upload.onerror = () => reject(new Error("Could not reach the audio processor."));
+        upload.onerror = () => reject(new Error(processorUnavailableMessage(processorLocation)));
         upload.onload = () => {
           if (upload.status >= 200 && upload.status < 300) {
             try {
@@ -945,7 +956,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
         ? "Uploaded. Your no-vocals karaoke track is now being created."
         : "Uploaded. Instrumental, drums, and vocals are now being isolated.");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Upload failed. Please retry.", "error");
+      setMessage(processingErrorMessage(error, "Upload failed. Please retry.", processorLocation), "error");
     } finally {
       setBusyAction(null);
     }
@@ -1053,8 +1064,9 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
       <button aria-controls="audio-edit-panel" aria-selected={module === "edit"} id="audio-edit-tab" onClick={openEditor} role="tab" tabIndex={module === "edit" ? 0 : -1} type="button"><SlidersHorizontal size={19} /><span>Edit audio<small>Record, trim & isolate</small></span></button>
       <button aria-controls="singing-coach-panel" aria-selected={module === "coach"} id="singing-coach-tab" onClick={() => openCoach()} role="tab" tabIndex={module === "coach" ? 0 : -1} type="button"><Activity size={20} /><span>Singing coach<small>See your pitch & improve</small></span><i>New</i></button>
     </div>
+    <ProcessorConnection location={processorLocation} local={connection.local} status={connection.status} checking={connection.checking} onRetry={() => void connection.check()} />
     <div aria-labelledby="singing-coach-tab" id="singing-coach-panel" role="tabpanel" hidden={module !== "coach"}>
-      <SingingCoach active={module === "coach"} activeAudio={workingAudio} authorize={authorizePractice} jobs={jobs} processorUrl={processorUrl} requestedReference={coachReference} />
+      <SingingCoach active={module === "coach"} activeAudio={workingAudio} authorize={authorizePractice} jobs={jobs} processorLocation={processorLocation} processorUrl={processorUrl} requestedReference={coachReference} />
     </div>
     <section aria-labelledby="audio-edit-tab" id="audio-edit-panel" role="tabpanel" className="studio-grid mt-10 grid gap-5 xl:grid-cols-[1.08fr_.92fr]" style={module === "coach" ? { display: "none" } : undefined}>
       <article className="glass workspace-panel rounded-[2rem] p-6 sm:p-8">
@@ -1070,7 +1082,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
           <button
             aria-label="Add audio or video from this device"
             className="upload-zone"
-            disabled={!configured || busy}
+            disabled={busy}
             onClick={() => inputRef.current?.click()}
             type="button"
           >
@@ -1168,7 +1180,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
                 <XCircle size={17} />Cancel this import
               </button>
             )}
-            <p className="youtube-import-note">No Google account or cookies are used. If YouTube blocks the cloud route, your private Mac helper takes over automatically while that Mac is awake.</p>
+            <p className="youtube-import-note">{processorLocation === "mac" ? "Imports run on your Mac while it is awake and online. No Google account or cookies are used." : "No Google account or cookies are used. If YouTube blocks the cloud route, your private Mac helper takes over automatically while that Mac is awake."}</p>
             {accessProtected && !accessVerified && <p className="processing-hint"><LockKeyhole size={13} />Private processing—password requested after you tap.</p>}
           </form>
         </details>
@@ -1379,12 +1391,6 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
           {accessProtected && !accessVerified && <p className="processing-hint"><LockKeyhole size={13} />Private processing—password requested after you tap Create vocal mix.</p>}
         </div>
 
-        {!configured && (
-          <div className="notice-card mt-4">
-            <p className="font-medium text-amber-100">Processor connection pending</p>
-            <p className="mt-1 text-xs leading-5 text-amber-100/70">The interface is ready. Add the processing service URL to enable uploads.</p>
-          </div>
-        )}
       </article>
 
       <article className="glass results-panel self-start rounded-[2rem] p-6 sm:p-8" id="processed-results">
@@ -1517,7 +1523,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
                       ? "privately import this YouTube audio"
                       : pendingAction === "youtube_cancel"
                         ? "cancel this YouTube import"
-                      : "create all three isolated tracks"}. It protects your Modal credits from public use.
+                      : "create all three isolated tracks"}. It keeps your studio’s audio processing private.
             </p>
             <label>
               Studio password

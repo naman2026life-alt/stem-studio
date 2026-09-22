@@ -23,7 +23,7 @@ The score measures **pitch matching to this reference**, not vocal beauty, dicti
 - Comparison searches for a single time offset, reports ambiguity, and measures signed/absolute pitch error against the reference's actual contour. No dynamic time warping or automatic key correction is used.
 - A matched frame earns full credit within 25 cents, decreases to 50 at 100 cents, and to zero at 300 cents. Missing reference frames earn zero. Scores require at least one second of matched clear singing and at least 30% reference coverage. These are transparent practice heuristics, not a validated assessment standard.
 
-The shared API implementation is `stem_studio/practice_jobs.py`; pitch analysis is `stem_studio/pitch.py`; alignment and scoring are `stem_studio/pitch_compare.py`. Both the portable API and Modal expose `POST /practice/jobs`, `GET /practice/jobs/{id}`, `GET /practice/jobs/{id}/audio`, and `POST /practice/compare`. Mutating endpoints use the existing private studio token. Temporary analysis and playback links expire after one hour. Only the requested section enters the model worker; uploaded originals are discarded after clipping. Practice and separation share the one-container Modal T4 worker.
+The shared API implementation is `stem_studio/practice_jobs.py`; pitch analysis is `stem_studio/pitch.py`; alignment and scoring are `stem_studio/pitch_compare.py`. Both the portable API and Modal expose `POST /practice/jobs`, `GET /practice/jobs/{id}`, `GET /practice/jobs/{id}/audio`, and `POST /practice/compare`. Mutating endpoints use the existing private studio token. Temporary analysis and playback links expire after one hour. Only the requested section enters the model worker; uploaded originals are discarded after clipping. On Modal, practice and separation share one T4 worker; the private Mac service runs the same workflows locally with bounded CPU resources.
 
 ### Reproduce the audio checks
 
@@ -45,16 +45,19 @@ See [validation and known limitations](docs/singing-coach-validation.md) for the
 ## Where it lives
 
 - Source: <https://github.com/naman2026life-alt/stem-studio>
-- Local app: Gradio on your Mac at `http://127.0.0.1:7860` while `python app.py` is running.
+- Private Mac interface: the full Next.js app at `http://127.0.0.1:3007`, with its authenticated processor at `http://127.0.0.1:8766`, after installing the optional login services. See [Mac setup and troubleshooting](docs/mac-processor.md).
+- Original local app: Gradio at `http://127.0.0.1:7860` while `python app.py` is running.
 - Hosted interface: Next.js in `web/`, deployed to Vercel.
-- Hosted processing: `modal_app.py`, designed for temporary GPU jobs on Modal.
+- Cloud processing option: `modal_app.py`, designed for temporary GPU jobs on Modal.
 - Portable processing API: `processor/api.py` and `Dockerfile.processor` for any suitable long-running container host.
+
+The Mac option needs no Modal payment method or GPU credits for local processing. Phone access can retain the Vercel interface and send jobs to the Mac through an authenticated HTTPS tunnel. This requires a separate tunnel setup and Vercel redeployment: installing the Mac services does **not** switch the live website automatically. The Mac must be awake, connected, and logged in. The [Mac guide](docs/mac-processor.md) covers the boundary between local readiness and a completed remote cutover.
 
 ## Why there is no Supabase
 
 The MVP is a simple upload → process → download flow. It does not need accounts, a database, or a permanent audio library, so Supabase would add setup and retention complexity without improving the core workflow.
 
-The hosted stack is intentionally lean:
+The original Modal-hosted option is intentionally lean; the Mac service replaces the processing layer without adding a database:
 
 ```text
 Vercel (Next.js interface)
@@ -116,6 +119,8 @@ npm run dev
 ```
 
 Open <http://localhost:3000>. For a local-only run, the shared secret may be left blank. Set the same `PROCESSOR_SHARED_SECRET` on both services before exposing the processor publicly.
+
+For the full interface with authenticated processing and automatic restart at Mac login, use the [private Mac service setup](docs/mac-processor.md) instead. It uses ports 3007/8766, stores the shared secret in Keychain, and keeps the simpler development workflow above unchanged.
 
 ## Deploy the processor to Modal
 

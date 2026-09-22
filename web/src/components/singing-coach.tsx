@@ -7,6 +7,7 @@ import { ExportActions } from "@/components/export-actions";
 import { DurationPicker } from "@/components/duration-picker";
 import { PitchGraph } from "@/components/pitch-graph";
 import { noteLabel, parsePracticeTime, practiceTime, safePracticeId, type PitchComparison, type PracticeJob } from "@/lib/practice";
+import { isMissingProcessorResource, processingErrorMessage, type ProcessorLocation } from "@/lib/processor-connection";
 import type { SeparationJob } from "@/lib/types";
 
 type Role = "take" | "reference";
@@ -82,11 +83,12 @@ function SourceControls({ role, source, setSource, activeAudio, vocals, disabled
   </div>;
 }
 
-export function SingingCoach({ active, activeAudio, authorize, jobs, processorUrl, requestedReference }: {
+export function SingingCoach({ active, activeAudio, authorize, jobs, processorLocation, processorUrl, requestedReference }: {
   active: boolean;
   activeAudio: File | null;
   authorize: () => Promise<Record<string, string>>;
   jobs: SeparationJob[];
+  processorLocation: ProcessorLocation;
   processorUrl: string;
   requestedReference: string | null;
 }) {
@@ -196,7 +198,7 @@ export function SingingCoach({ active, activeAudio, authorize, jobs, processorUr
           const response = await fetch(`${processorUrl}/practice/jobs/${id}`, { cache: "no-store", signal: abort.signal });
           if (stopped || pollRef.current[role] !== id) return;
           const setter = role === "take" ? setTakeJob : setReferenceJob;
-          if (response.status === 404 || response.status === 410) {
+          if (await isMissingProcessorResource(response)) {
             pollRef.current[role] = null;
             saveSession(pollRef.current.take, pollRef.current.reference);
             setter(null);
@@ -214,7 +216,7 @@ export function SingingCoach({ active, activeAudio, authorize, jobs, processorUr
       }));
       inFlight = false;
       if (stopped) return;
-      if (offline) setNetworkHint("Connection interrupted. We’re reconnecting to your analysis automatically.");
+      if (offline) setNetworkHint(processorLocation === "mac" ? "Connection interrupted. Keep your Mac awake and online. We’ll reconnect to this analysis automatically—no need to upload again." : "Connection interrupted. We’re reconnecting to your analysis automatically.");
       else setNetworkHint((hint) => hint.startsWith("Connection interrupted") ? "" : hint);
       timer = window.setTimeout(poll, document.hidden ? 10_000 : 3_000);
     };
@@ -222,7 +224,7 @@ export function SingingCoach({ active, activeAudio, authorize, jobs, processorUr
     const onVisible = () => { if (!document.hidden && !inFlight) { window.clearTimeout(timer); nextPollRef.current = {}; void poll(); } };
     document.addEventListener("visibilitychange", onVisible);
     return () => { stopped = true; abort.abort(); window.clearTimeout(timer); document.removeEventListener("visibilitychange", onVisible); };
-  }, [processorUrl]);
+  }, [processorLocation, processorUrl]);
 
   async function startRecording() {
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") { setError("Recording needs a supported browser with microphone permission. You can also upload an audio file."); return; }
@@ -317,7 +319,7 @@ export function SingingCoach({ active, activeAudio, authorize, jobs, processorUr
       setComparison(null);
       setComparisonDirty(false);
       if (role === "take") window.setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" }), 50);
-    } catch (error) { if (!(error instanceof DOMException && error.name === "AbortError")) setError(error instanceof Error ? error.message : "The analysis could not start. Please try again."); }
+    } catch (error) { if (!(error instanceof DOMException && error.name === "AbortError")) setError(processingErrorMessage(error, "The analysis could not start. Please try again.", processorLocation)); }
     finally { if (mountedRef.current) setUploading(null); requestAbortRef.current = null; }
   }
 
@@ -339,7 +341,7 @@ export function SingingCoach({ active, activeAudio, authorize, jobs, processorUr
       setComparisonDirty(false);
       setOffset(String(next.alignment.offset_seconds));
       resultsRef.current?.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
-    } catch (error) { if (!(error instanceof DOMException && error.name === "AbortError")) setError(error instanceof Error ? error.message : "Could not compare these phrases."); }
+    } catch (error) { if (!(error instanceof DOMException && error.name === "AbortError")) setError(processingErrorMessage(error, "Could not compare these phrases.", processorLocation)); }
     finally { if (mountedRef.current) setCompareBusy(false); requestAbortRef.current = null; }
   }
 
@@ -355,7 +357,6 @@ export function SingingCoach({ active, activeAudio, authorize, jobs, processorUr
 
   return <div className="singing-coach" hidden={!active}>
     <div className="coach-intro"><div><p className="eyebrow">Hear it. See it. Refine it.</p><h2>Get to know your voice.</h2><p>See the notes you actually sing, with the detail that helps you improve. Start with one short phrase.</p></div><span className="coach-intro-mark"><Activity size={32} /></span></div>
-    {!processorUrl && <p className="coach-error" role="alert">The audio processor is not configured. Please try again after it has been connected.</p>}
     <div className="coach-layout">
       <div className="coach-input-column">
         <section className="coach-card" aria-labelledby="coach-take-heading">

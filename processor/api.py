@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import importlib.util
 import json
 import math
 import os
@@ -13,13 +14,16 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
+import sys
 from typing import Literal
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 
 from stem_studio.audio import (
@@ -55,7 +59,27 @@ MAX_MIX_GAIN_DB = 24.0
 SEPARATION_ERROR_MESSAGE = "The audio could not be separated. Check the file and try again."
 MIX_ERROR_MESSAGE = "These tracks could not be mixed. Check both audio files and the timing controls."
 RESOURCE_ID_PATTERN = re.compile(r"[a-f0-9]{32}")
-WORK_ROOT = Path(os.environ.get("STEM_STUDIO_WORK_ROOT", tempfile.gettempdir())) / "stem-studio-api"
+
+
+def _default_data_root() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Stem Studio" / "processor"
+    return Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))) / "stem-studio" / "processor"
+
+
+# STEM_STUDIO_DATA_DIR is an exact path. Preserve the older parent-directory
+# setting so existing Docker and local deployments do not lose their outputs.
+WORK_ROOT = Path(os.environ["STEM_STUDIO_DATA_DIR"]).expanduser() if os.environ.get("STEM_STUDIO_DATA_DIR") else (
+    Path(os.environ["STEM_STUDIO_WORK_ROOT"]).expanduser() / "stem-studio-api"
+    if os.environ.get("STEM_STUDIO_WORK_ROOT") else _default_data_root()
+)
+MODEL_ROOT = Path(os.environ.get(
+    "STEM_STUDIO_MODEL_DIR", os.environ.get("TORCH_HOME", str(Path(__file__).resolve().parent.parent / ".model-cache")),
+)).expanduser()
+CPU_THREADS = max(1, min(8, int(os.environ.get("STEM_STUDIO_CPU_THREADS", "4"))))
+os.environ["TORCH_HOME"] = str(MODEL_ROOT)
+for _thread_setting in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ[_thread_setting] = str(CPU_THREADS)
 WORK_ROOT.mkdir(parents=True, exist_ok=True)
 
 
@@ -104,6 +128,7 @@ mixes: dict[str, MixJob] = {}
 jobs_lock = threading.Lock()
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stem-studio")
 youtube_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stem-studio-youtube")
+media_busy = False
 
 
 def _allowed_origins() -> list[str]:
@@ -111,7 +136,46 @@ def _allowed_origins() -> list[str]:
     return [origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()]
 
 
-app = FastAPI(title="Stem Studio Processor", version="1.0.0")
+def _auth_required() -> bool:
+    return os.environ.get("PROCESSOR_REQUIRE_AUTH", "").lower() in {"1", "true", "yes"}
+
+
+def _validate_configuration() -> None:
+    if _auth_required():
+        secret = os.environ.get("PROCESSOR_SHARED_SECRET", "")
+        if len(secret) < 32:
+            raise RuntimeError("Remote mode requires a PROCESSOR_SHARED_SECRET of at least 32 characters.")
+        if "*" in _allowed_origins():
+            raise RuntimeError("Remote mode requires explicit ALLOWED_ORIGINS; a wildcard is not allowed.")
+    for directory in (WORK_ROOT, MODEL_ROOT):
+        directory.mkdir(parents=True, exist_ok=True)
+        # Creating an actual file catches ACL/filesystem restrictions that a
+        # simple os.access check can miss on macOS.
+        with tempfile.TemporaryFile(dir=directory):
+            pass
+
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    _validate_configuration()
+    _restore_jobs()
+    _cleanup_expired()
+
+    async def cleanup_loop() -> None:
+        while True:
+            await asyncio.sleep(60)
+            await asyncio.to_thread(_cleanup_expired)
+
+    task = asyncio.create_task(cleanup_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(title="Stem Studio Processor", version="1.1.0", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins(),
@@ -119,6 +183,23 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "X-Stem-Timestamp", "X-Stem-Signature"],
 )
+
+
+@app.middleware("http")
+async def protect_remote_requests(request: Request, call_next):
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        secret = os.environ.get("PROCESSOR_SHARED_SECRET", "")
+        missing_remote_auth = _auth_required() and len(secret) < 32
+        client_host = request.client.host if request.client else ""
+        local_client = client_host in {"127.0.0.1", "::1", "localhost", "testclient"}
+        if missing_remote_auth or (not secret and not local_client):
+            return JSONResponse(status_code=503, content={"detail": "Remote processing authentication is not configured."})
+    response = await call_next(request)
+    # Expiring recordings and session metadata must not remain in tunnel/CDN
+    # caches after the processor has removed them.
+    response.headers.setdefault("Cache-Control", "no-store")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    return response
 
 
 def _public_job(job: Job) -> dict[str, object]:
@@ -157,6 +238,94 @@ def _mix_dir(mix_id: str) -> Path:
     return WORK_ROOT / "mixes" / mix_id
 
 
+def _persist_job(job: Job | YouTubeImportJob | MixJob) -> None:
+    _validate_resource_id(job.id, "job")
+    if isinstance(job, Job):
+        directory = _job_dir(job.id)
+    elif isinstance(job, YouTubeImportJob):
+        directory = _youtube_import_dir(job.id)
+    else:
+        directory = _mix_dir(job.id)
+    directory.mkdir(parents=True, exist_ok=True)
+    temporary = directory / f"status-{uuid.uuid4().hex}.tmp"
+    temporary.write_text(json.dumps(asdict(job), allow_nan=False))
+    temporary.replace(directory / "status.json")
+
+
+def _restore_jobs() -> None:
+    """Keep finished results across restarts; never silently rerun old work."""
+    from stem_studio.practice_jobs import write_record
+
+    now = time.time()
+    with jobs_lock:
+        for directory, records, job_type in (
+            (WORK_ROOT, jobs, Job), (WORK_ROOT / "youtube-imports", youtube_imports, YouTubeImportJob),
+            (WORK_ROOT / "mixes", mixes, MixJob),
+        ):
+            records.clear()
+            for path in directory.glob("*/status.json"):
+                if not RESOURCE_ID_PATTERN.fullmatch(path.parent.name) or path.parent.is_symlink() or path.is_symlink():
+                    continue
+                try:
+                    data = json.loads(path.read_text())
+                    job = job_type(**data)
+                    if (job.id != path.parent.name or not math.isfinite(job.expires_at)
+                            or not math.isfinite(job.created_at)
+                            or job.status not in {"queued", "processing", "completed", "failed"}):
+                        shutil.rmtree(path.parent, ignore_errors=True)
+                        continue
+                    if job.expires_at <= now:
+                        shutil.rmtree(path.parent, ignore_errors=True)
+                        continue
+                    if job.status in {"queued", "processing"}:
+                        job.status = "failed"
+                        job.progress = 100
+                        job.error = "The processor restarted during this job. Please submit the recording again."
+                        for source in path.parent.glob("source.*"):
+                            source.unlink(missing_ok=True)
+                        _persist_job(job)
+                    records[job.id] = job
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    shutil.rmtree(path.parent, ignore_errors=True)
+                    continue
+        for path in (WORK_ROOT / "practice").glob("*/status.json"):
+            if not RESOURCE_ID_PATTERN.fullmatch(path.parent.name) or path.parent.is_symlink() or path.is_symlink():
+                continue
+            try:
+                data = json.loads(path.read_text())
+                if data.get("status") in {"queued", "processing"}:
+                    write_record(WORK_ROOT / "practice", path.parent.name, status="failed", progress=100,
+                                 stage="Processor restarted", error="The processor restarted. Analyze this recording again.")
+                    (path.parent / "clip.wav").unlink(missing_ok=True)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+
+
+def _active_practice_count() -> int:
+    active = 0
+    for path in (WORK_ROOT / "practice").glob("*/status.json"):
+        try:
+            record = json.loads(path.read_text())
+            active += record.get("status") in {"queued", "processing"} and float(record["expires_at"]) > time.time()
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return active
+
+
+async def _run_media(function, *args, **kwargs):
+    """A single model/media worker bounds CPU and peak memory on a laptop."""
+    global media_busy
+    with jobs_lock:
+        if media_busy or any(job.status in {"queued", "processing"} for job in jobs.values()) or _active_practice_count():
+            raise HTTPException(status_code=429, detail="The Mac is processing another recording. Try this action when it finishes.")
+        media_busy = True
+    try:
+        return await asyncio.get_running_loop().run_in_executor(executor, partial(function, *args, **kwargs))
+    finally:
+        with jobs_lock:
+            media_busy = False
+
+
 def _cleanup_expired() -> None:
     from stem_studio.practice_jobs import cleanup_practice, expire_stalled
 
@@ -172,6 +341,7 @@ def _cleanup_expired() -> None:
                 job.status = "failed"
                 job.progress = 100
                 job.error = "This YouTube import exceeded its processing window. Please try again."
+                _persist_job(job)
         expired_imports = [job_id for job_id, job in youtube_imports.items() if job.expires_at <= now]
         for job_id in expired_imports:
             youtube_imports.pop(job_id, None)
@@ -188,6 +358,8 @@ def _cleanup_expired() -> None:
 
 def _verify_upload_token(timestamp: str | None, signature: str | None) -> None:
     secret = os.environ.get("PROCESSOR_SHARED_SECRET")
+    if _auth_required() and len(secret or "") < 32:
+        raise HTTPException(status_code=503, detail="Remote processing authentication is not configured.")
     if not secret:
         return
     if not timestamp or not signature:
@@ -317,14 +489,18 @@ def _set_job(job_id: str, **values: object) -> None:
         if job:
             for key, value in values.items():
                 setattr(job, key, value)
+            _persist_job(job)
 
 
-def _set_youtube_import(job_id: str, **values: object) -> None:
+def _set_youtube_import(job_id: str, **values: object) -> bool:
     with jobs_lock:
         job = youtube_imports.get(job_id)
-        if job:
+        if job and job.status not in {"failed", "completed"}:
             for key, value in values.items():
                 setattr(job, key, value)
+            _persist_job(job)
+            return True
+    return False
 
 
 def _process_job(job_id: str, source: Path, mode: Literal["stems", "karaoke"] = "stems") -> None:
@@ -360,12 +536,15 @@ def _process_job(job_id: str, source: Path, mode: Literal["stems", "karaoke"] = 
 def _process_youtube_import(job_id: str, canonical_url: str) -> None:
     directory = _youtube_import_dir(job_id)
     try:
-        _set_youtube_import(job_id, status="processing", progress=15)
+        if not _set_youtube_import(job_id, status="processing", progress=15):
+            return
         imported = import_youtube_audio(canonical_url, directory)
         with jobs_lock:
             job = youtube_imports.get(job_id)
             if not job or job.status not in {"queued", "processing"}:
                 shutil.rmtree(directory, ignore_errors=True)
+                if job:
+                    _persist_job(job)
                 return
             job.status = "completed"
             job.progress = 100
@@ -373,6 +552,7 @@ def _process_youtube_import(job_id: str, canonical_url: str) -> None:
             job.file_name = imported.download_name
             job.file_url = f"/imports/youtube/{job_id}/file"
             job.duration_seconds = round(imported.duration_seconds, 3)
+            _persist_job(job)
     except YouTubeHostedBlockError:
         shutil.rmtree(directory, ignore_errors=True)
         _set_youtube_import(
@@ -395,7 +575,30 @@ def health() -> dict[str, object]:
     with jobs_lock:
         active = sum(job.status in {"queued", "processing"} for job in jobs.values())
         active_imports = sum(job.status in {"queued", "processing"} for job in youtube_imports.values())
-    return {"status": "ok", "active_jobs": active, "active_youtube_imports": active_imports, "model": "htdemucs"}
+    return {"status": "ok", "active_jobs": active, "active_youtube_imports": active_imports,
+            "active_practice_jobs": _active_practice_count(), "active_media_jobs": int(media_busy),
+            "model": "htdemucs", "compute": "local", "model_workers": 1, "cpu_threads": CPU_THREADS}
+
+
+@app.get("/ready")
+def readiness() -> JSONResponse:
+    """Readiness checks do not download or load either neural model."""
+    checks = {
+        "ffmpeg": bool(shutil.which("ffmpeg")),
+        "ffprobe": bool(shutil.which("ffprobe")),
+        "separation_package": importlib.util.find_spec("demucs") is not None,
+        "pitch_package": importlib.util.find_spec("torchcrepe") is not None,
+        "data_writable": WORK_ROOT.is_dir() and os.access(WORK_ROOT, os.W_OK),
+        "models_writable": MODEL_ROOT.is_dir() and os.access(MODEL_ROOT, os.W_OK),
+        "remote_auth": not _auth_required() or len(os.environ.get("PROCESSOR_SHARED_SECRET", "")) >= 32,
+    }
+    try:
+        checks["disk_space"] = shutil.disk_usage(WORK_ROOT).free >= 1024 * 1024 * 1024
+    except OSError:
+        checks["disk_space"] = False
+    ready = all(checks.values())
+    return JSONResponse(status_code=200 if ready else 503,
+                        content={"status": "ready" if ready else "not_ready", "checks": checks})
 
 
 @app.post("/jobs", status_code=202)
@@ -436,6 +639,7 @@ async def create_job(
             shutil.rmtree(directory, ignore_errors=True)
             raise HTTPException(status_code=429, detail="The processor is busy. Please try again shortly.")
         jobs[job_id] = job
+        _persist_job(job)
     try:
         executor.submit(_process_job, job_id, source, validated_mode)
     except RuntimeError as exc:
@@ -465,7 +669,10 @@ async def extract_mp3(
     source = await _save_upload(file, directory, SUPPORTED_VIDEO_EXTENSIONS)
     output = directory / f"{Path(source_name).stem or 'video'}.mp3"
     try:
-        await asyncio.to_thread(extract_audio_to_mp3, source, output)
+        await _run_media(extract_audio_to_mp3, source, output)
+    except HTTPException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
     except (OSError, RuntimeError, ValueError) as exc:
         shutil.rmtree(directory, ignore_errors=True)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -491,7 +698,10 @@ async def trim_merge(
     source = await _save_upload(file, directory, SUPPORTED_EXTENSIONS)
     output = directory / f"{Path(source_name).stem or 'audio'}-trimmed.mp3"
     try:
-        await asyncio.to_thread(trim_and_merge_audio, source, parsed_segments, output)
+        await _run_media(trim_and_merge_audio, source, parsed_segments, output)
+    except HTTPException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
     except (OSError, RuntimeError, ValueError) as exc:
         shutil.rmtree(directory, ignore_errors=True)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -564,7 +774,7 @@ async def create_mix(
             mix_directory / "vocal-input",
             SUPPORTED_EXTENSIONS,
         )
-        wav_path, mp3_path = await asyncio.to_thread(
+        wav_path, mp3_path = await _run_media(
             mix_tracks,
             instrumental_source,
             vocal_source,
@@ -590,6 +800,7 @@ async def create_mix(
         )
         with jobs_lock:
             mixes[mix_id] = job
+            _persist_job(job)
     except HTTPException:
         shutil.rmtree(mix_directory, ignore_errors=True)
         raise
@@ -636,6 +847,7 @@ async def create_youtube_import(
             )
         directory.mkdir(parents=True, exist_ok=True)
         youtube_imports[job_id] = job
+        _persist_job(job)
     try:
         youtube_executor.submit(_process_youtube_import, job_id, canonical_url)
     except RuntimeError as exc:
@@ -674,6 +886,7 @@ def cancel_youtube_import(
             job.status = "failed"
             job.progress = 100
             job.error = "YouTube import cancelled."
+            _persist_job(job)
         return _public_youtube_import(job)
 
 

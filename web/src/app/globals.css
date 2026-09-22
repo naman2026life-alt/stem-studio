@@ -1,5 +1,23 @@
 @import "tailwindcss";
 
+.processor-connection { display:flex; align-items:flex-start; gap:.7rem; margin:0 0 1.25rem; border:1px solid #94a3b822; border-radius:1rem; background:#94a3b808; padding:.85rem 1rem; color:#94a3b8; }
+.processor-connection-icon { display:grid; flex-shrink:0; place-items:center; width:1.7rem; height:1.7rem; }
+.processor-connection > div { min-width:0; flex:1; }
+.processor-connection strong { display:block; color:#cbd5e1; font-size:.77rem; font-weight:600; }
+.processor-connection p { margin-top:.22rem; font-size:.67rem; line-height:1.55; color:#94a3b8; }
+.processor-connection.is-ready { border-color:#34d39926; background:#34d39906; color:#6ee7b7; }
+.processor-connection.is-ready strong { color:#a7f3d0; }
+.processor-connection.is-unavailable,.processor-connection.is-unconfigured,.processor-connection.is-attention { border-color:#fbbf2426; background:#fbbf2406; color:#fcd34d; }
+.processor-connection.is-unavailable strong,.processor-connection.is-unconfigured strong,.processor-connection.is-attention strong { color:#fde68a; }
+.processor-connection button { display:flex; align-items:center; justify-content:center; gap:.4rem; flex-shrink:0; min-height:2.6rem; border:1px solid #94a3b833; border-radius:.7rem; background:#ffffff05; padding:.5rem .7rem; font-size:.71rem; color:#cbd5e1; }
+.processor-connection button:focus-visible { outline:2px solid #c4b5fd; outline-offset:3px; }
+@media (max-width:560px) {
+  .processor-connection { padding:.8rem; gap:.5rem; }
+  .processor-connection.is-unavailable,.processor-connection.is-checking { flex-wrap:wrap; }
+  .processor-connection > div { flex-basis:calc(100% - 2.5rem); }
+  .processor-connection button { margin-left:2.2rem; }
+}
+
 /* Singing practice: quiet, readable surfaces around a precise pitch plot. */
 .studio-module-tabs { display:grid; grid-template-columns:1fr 1fr; width:min(100%,39rem); gap:.4rem; margin:2rem 0 1.25rem; padding:.4rem; border:1px solid rgba(196,181,253,.17); border-radius:1.15rem; background:#0c1020; scroll-margin-top:1rem; }
 .studio-module-tabs > button { display:flex; align-items:center; justify-content:center; gap:.7rem; min-height:4.2rem; padding:.6rem .9rem; border:1px solid transparent; border-radius:.83rem; color:#94a3b8; text-align:left; }
