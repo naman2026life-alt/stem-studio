@@ -2,6 +2,46 @@
 
 Stem Studio accepts audio or video, can privately import permitted audio from a single YouTube video, can extract a video's audio as MP3, keeps and joins multiple time ranges, and includes a dedicated **Karaoke mode** that removes detected vocals and returns one backing track. It can also split the active audio into **instrumental/no-vocals**, **drums-only**, and **vocals-only** tracks, then mix a separately recorded vocal over an instrumental with offset, trim, and gain controls.
 
+**Singing coach** adds a continuous pitch graph for your recording and a reference comparison for practicing a song. Record or upload a short phrase, inspect the detected fundamental and note entries, then compare your take with a solo vocal or a selected passage from a full song.
+
+## Singing coach
+
+1. Open **Singing coach** in the hosted app. Record a take, upload audio, or use the active audio from the editor.
+2. Choose a short section (15 seconds by default, up to 90 seconds). For a full song, choose the start of the phrase you want to practice and select the input with backing music; the processor isolates that section's vocal first. Existing vocal stems can be reused.
+3. Analyze the take to see time on the horizontal axis and musical pitch on the vertical axis. The trace is continuous: bends, vibrato, and note attacks are preserved. Gaps indicate silence or uncertain pitch. The optional raw trace exposes the detector's unsmoothed estimate.
+4. Add and analyze the same phrase from a reference song. Compare the contours, hear the selected audio, and inspect pitch differences in cents (100 cents = one semitone). Automatic alignment changes only the start time. Manual offset and an explicit key/octave adjustment are available.
+5. Choose your **Sa** if you want relative Indian note labels. A recording cannot uniquely establish the tonic, so the app does not silently guess it.
+
+The score measures **pitch matching to this reference**, not vocal beauty, diction, rhythm proficiency, or raga correctness. Missing reference notes lower the score. Silence and unreliable matches do not earn a score. A repeated melody, steady note, or very different performance can make automatic timing ambiguous; use manual alignment in those cases. The app never silently fixes the singer's key or octave and never time-warps mistakes away.
+
+### Pitch analysis design
+
+- [CREPE full](https://github.com/maxrmorrison/torchcrepe), through pinned `torchcrepe==0.0.24`, estimates one monophonic fundamental every 10 ms. Model weights ship with that dependency and are not committed here.
+- A sequence decoder uses the model's pitch evidence across the complete clip, with a finite cost for genuine large note jumps. This avoids inference-batch seams and permits real octave changes.
+- Model confidence and signal level reject uncertain/noisy frames. An independent waveform-periodicity check challenges octave/third-harmonic estimates when a lower fundamental has stronger acoustic support; brief corrections also require matching surrounding notes. Conservative short-glitch repair and a 30 ms median suppress excursions without snapping frequencies onto equal-tempered notes or bridging breaths.
+- Sustained-note descriptions summarize pitch stability and the first part of each note. The plotted curve remains the measured performance.
+- Comparison searches for a single time offset, reports ambiguity, and measures signed/absolute pitch error against the reference's actual contour. No dynamic time warping or automatic key correction is used.
+- A matched frame earns full credit within 25 cents, decreases to 50 at 100 cents, and to zero at 300 cents. Missing reference frames earn zero. Scores require at least one second of matched clear singing and at least 30% reference coverage. These are transparent practice heuristics, not a validated assessment standard.
+
+The shared API implementation is `stem_studio/practice_jobs.py`; pitch analysis is `stem_studio/pitch.py`; alignment and scoring are `stem_studio/pitch_compare.py`. Both the portable API and Modal expose `POST /practice/jobs`, `GET /practice/jobs/{id}`, `GET /practice/jobs/{id}/audio`, and `POST /practice/compare`. Mutating endpoints use the existing private studio token. Temporary analysis and playback links expire after one hour. Only the requested section enters the model worker; uploaded originals are discarded after clipping. Practice and separation share the one-container Modal T4 worker.
+
+### Reproduce the audio checks
+
+```bash
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest -q
+python scripts/benchmark_pitch.py
+
+# Optional: generates short synthetic audio and exercises the deployed API.
+# This uses the existing Modal secret internally and spends a little compute.
+modal run scripts/verify_practice_live.py
+```
+
+Ordinary tests do not download or run a neural model. The benchmark runs the real model against generated ground truth: dominant overtones, a missing fundamental, noise/silence, vibrato, note changes, octave jumps, quiet audio, and scooped attacks. These controlled cases do not establish accuracy on every singer or recording. For best results, use a single clear voice; harmonies, heavy reverb, accompaniment leakage, and extreme vocal effects remain difficult. Analysis runs after recording stops, rather than as a live microphone tuner.
+
+See [validation and known limitations](docs/singing-coach-validation.md) for the real-singer development benchmark, score safeguards, and release checks. Video uploads with audio are supported; the selected audio section is extracted before analysis.
+
 ## Where it lives
 
 - Source: <https://github.com/naman2026life-alt/stem-studio>
@@ -30,6 +70,8 @@ Modal (temporary FFmpeg tools + Demucs on a T4 GPU)
   ├── instrumental + recorded vocal → WAV + MP3 mix (CPU)
   ├── Karaoke mode → karaoke.wav (drums + bass + other)
   ├── or full split → instrumental.wav + drums.wav + vocals.wav
+  ├── singing phrase → optional vocal isolation → pitch contour + note entries
+  ├── two analysed phrases → timing alignment + pitch comparison
   └── compact 192 kbps MP3 copies prepared for mobile sharing
                     │
                     └── preview/save/share; temporary tool files are deleted

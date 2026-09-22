@@ -3,6 +3,7 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
+  Activity,
   CircleStop,
   Clock3,
   FileAudio,
@@ -29,6 +30,7 @@ import {
 
 import { DurationPicker } from "@/components/duration-picker";
 import { ExportActions } from "@/components/export-actions";
+import { SingingCoach } from "@/components/singing-coach";
 import { VocalMixer, type MixerInstrumentalOption, type VocalMixRequest } from "@/components/vocal-mixer";
 import type { SeparationJob, SeparationMode, VocalMixResult, YouTubeImportJob } from "@/lib/types";
 
@@ -46,7 +48,7 @@ const YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 
 type MediaKind = "audio" | "video";
 type BusyAction = "convert" | "mix" | "trim" | "youtube" | SeparationMode | null;
-type ProtectedAction = Exclude<BusyAction, null> | "youtube_cancel";
+type ProtectedAction = Exclude<BusyAction, null> | "youtube_cancel" | "practice";
 type RecordingState = "idle" | "requesting" | "recording" | "paused" | "processing";
 type TrimPart = { id: number; start: string; end: string };
 type PickerTarget = { field: "start" | "end"; partId: number; partIndex: number };
@@ -220,6 +222,9 @@ async function parseResponseError(response: Response) {
 }
 
 export function Studio({ accessProtected, processorUrl }: { accessProtected: boolean; processorUrl: string }) {
+  const [module, setModule] = useState<"edit" | "coach">("edit");
+  const [coachReference, setCoachReference] = useState<string | null>(null);
+  const practiceAuthRef = useRef<{ resolve: (headers: Record<string, string>) => void; reject: (error: Error) => void } | null>(null);
   const [jobs, setJobs] = useState<SeparationJob[]>([]);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [sourceKind, setSourceKind] = useState<MediaKind | null>(null);
@@ -354,6 +359,8 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     const focusTimer = window.setTimeout(() => unlockInputRef.current?.focus(), 0);
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        practiceAuthRef.current?.reject(new Error("Processing cancelled. Your recording is still here."));
+        practiceAuthRef.current = null;
         setPasswordDraft("");
         setPendingAction(null);
       }
@@ -945,6 +952,11 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
   }
 
   function executeAction(action: ProtectedAction, password?: string) {
+    if (action === "practice") {
+      const pending = practiceAuthRef.current;
+      practiceAuthRef.current = null;
+      if (pending) void requestToken(password).then((token) => pending.resolve(tokenHeaders(token))).catch(pending.reject);
+    }
     if (action === "youtube") void importFromYouTube(password);
     if (action === "youtube_cancel") void cancelYouTubeImport(password);
     if (action === "convert") void convertVideo(password);
@@ -1014,8 +1026,37 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
     setMessage("Temporary results cleared from this page.", "success");
   }
 
+  async function authorizePractice(): Promise<Record<string, string>> {
+    if (!accessProtected || accessVerified) return tokenHeaders(await requestToken());
+    return new Promise((resolve, reject) => {
+      practiceAuthRef.current = { resolve, reject };
+      runProtectedAction("practice");
+    });
+  }
+
+  function openCoach(referenceId?: string) {
+    if (referenceId) setCoachReference(referenceId);
+    setModule("coach");
+    document.getElementById("audio-edit-panel")?.querySelectorAll<HTMLMediaElement>("audio,video").forEach((media) => media.pause());
+    if (mediaRecorderRef.current?.state === "recording" || mediaRecorderRef.current?.state === "paused") mediaRecorderRef.current.stop();
+    window.setTimeout(() => document.getElementById("studio-module-tabs")?.scrollIntoView({ behavior: scrollBehavior(), block: "start" }), 0);
+  }
+
+  function openEditor() {
+    document.getElementById("singing-coach-panel")?.querySelectorAll<HTMLMediaElement>("audio,video").forEach((media) => media.pause());
+    setModule("edit");
+  }
+
   return (
-    <section className="studio-grid mt-10 grid gap-5 xl:grid-cols-[1.08fr_.92fr]">
+    <>
+    <div className="studio-module-tabs" id="studio-module-tabs" role="tablist" aria-label="Studio workspace" onKeyDown={(event) => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); const next = event.key === "Home" ? "edit" : event.key === "End" ? "coach" : module === "edit" ? "coach" : "edit"; if (next === "coach") openCoach(); else openEditor(); document.getElementById(next === "coach" ? "singing-coach-tab" : "audio-edit-tab")?.focus(); }}>
+      <button aria-controls="audio-edit-panel" aria-selected={module === "edit"} id="audio-edit-tab" onClick={openEditor} role="tab" tabIndex={module === "edit" ? 0 : -1} type="button"><SlidersHorizontal size={19} /><span>Edit audio<small>Record, trim & isolate</small></span></button>
+      <button aria-controls="singing-coach-panel" aria-selected={module === "coach"} id="singing-coach-tab" onClick={() => openCoach()} role="tab" tabIndex={module === "coach" ? 0 : -1} type="button"><Activity size={20} /><span>Singing coach<small>See your pitch & improve</small></span><i>New</i></button>
+    </div>
+    <div aria-labelledby="singing-coach-tab" id="singing-coach-panel" role="tabpanel" hidden={module !== "coach"}>
+      <SingingCoach active={module === "coach"} activeAudio={workingAudio} authorize={authorizePractice} jobs={jobs} processorUrl={processorUrl} requestedReference={coachReference} />
+    </div>
+    <section aria-labelledby="audio-edit-tab" id="audio-edit-panel" role="tabpanel" className="studio-grid mt-10 grid gap-5 xl:grid-cols-[1.08fr_.92fr]" style={module === "coach" ? { display: "none" } : undefined}>
       <article className="glass workspace-panel rounded-[2rem] p-6 sm:p-8">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
@@ -1396,6 +1437,9 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
                               <SlidersHorizontal size={15} />Use in vocal mix
                             </button>
                           )}
+                          {stem === "vocals" && (
+                            <button className="use-in-mixer-button" onClick={() => openCoach(job.id)} type="button"><Activity size={15} />Practise with this vocal</button>
+                          )}
                         </div>
                       );
                     })}
@@ -1436,7 +1480,9 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
         </button>
       )}
 
-      {feedback && (
+    </section>
+
+      {feedback && module === "edit" && (
         <div className={`status-message status-toast is-${feedback.kind}`} role={feedback.kind === "error" ? "alert" : "status"}>
           <span>{feedback.text}</span>
           <button aria-label="Dismiss message" onClick={() => setFeedback(null)} type="button"><XCircle size={17} /></button>
@@ -1463,6 +1509,8 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
                   ? "convert this video"
                   : pendingAction === "karaoke"
                     ? "remove the vocals and make a karaoke track"
+                    : pendingAction === "practice"
+                      ? "analyse and compare your singing"
                     : pendingAction === "mix"
                       ? "mix this vocal with the selected instrumental"
                     : pendingAction === "youtube"
@@ -1483,7 +1531,7 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
               />
             </label>
             <div className="unlock-actions">
-              <button className="button-ghost justify-center" onClick={() => { setPasswordDraft(""); setPendingAction(null); }} type="button">Cancel</button>
+              <button className="button-ghost justify-center" onClick={() => { practiceAuthRef.current?.reject(new Error("Processing cancelled. Your recording is still here.")); practiceAuthRef.current = null; setPasswordDraft(""); setPendingAction(null); }} type="button">Cancel</button>
               <button className="button-primary justify-center" disabled={!passwordDraft.trim()} type="submit">
                 <UnlockKeyhole size={17} />Unlock & continue
               </button>
@@ -1504,6 +1552,6 @@ export function Studio({ accessProtected, processorUrl }: { accessProtected: boo
           onUseTrackEnd={useTrackEnd}
         />
       )}
-    </section>
+    </>
   );
 }

@@ -40,6 +40,7 @@ from stem_studio.youtube import (
     canonicalize_youtube_url,
     import_youtube_audio,
 )
+from stem_studio.practice_jobs import process_practice, register_practice_routes
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "150")) * 1024 * 1024
 JOB_TTL_SECONDS = int(os.environ.get("JOB_TTL_SECONDS", "3600"))
@@ -157,6 +158,10 @@ def _mix_dir(mix_id: str) -> Path:
 
 
 def _cleanup_expired() -> None:
+    from stem_studio.practice_jobs import cleanup_practice, expire_stalled
+
+    expire_stalled(WORK_ROOT / "practice")
+    cleanup_practice(WORK_ROOT / "practice")
     now = time.time()
     with jobs_lock:
         expired = [job_id for job_id, job in jobs.items() if job.expires_at <= now]
@@ -750,3 +755,33 @@ def download_mix(mix_id: str, file_format: str) -> FileResponse:
         filename=f"stem-studio-mix.{file_format}",
         headers={"Cache-Control": "private, no-store"},
     )
+
+
+async def _queue_practice(job_id: str) -> None:
+    # Share the local model executor so separation and practice cannot compete
+    # for memory on a MacBook or a single-worker portable container.
+    executor.submit(process_practice, WORK_ROOT / "practice", job_id)
+
+
+async def _practice_vocals(job_id: str) -> tuple[str, Path]:
+    _validate_resource_id(job_id, "separation job")
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job or job.status != "completed" or job.expires_at <= time.time() or not job.vocals_url:
+            raise HTTPException(status_code=404, detail="This vocal result is no longer available.")
+        path = _job_dir(job_id) / "outputs" / "vocals.wav"
+        name = job.source_name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="This vocal result is no longer available.")
+    return name, path
+
+
+async def _practice_local_io() -> None:
+    pass
+
+
+register_practice_routes(
+    app, root=lambda: WORK_ROOT / "practice", verify_token=_verify_upload_token,
+    save_upload=_save_upload, queue_job=_queue_practice, completed_vocals=_practice_vocals,
+    reload=_practice_local_io, commit=_practice_local_io,
+)
